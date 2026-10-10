@@ -46,6 +46,7 @@
             "Tectonic plate simulation with collision detection",
             "Glacial, hydraulic, and thermal erosion",
             "Climate simulation with wind, precipitation, and ocean currents",
+            "Rivers, lakes and groundwater from flow routing and runoff",
             "Hotspot volcanism with island chains",
             "Interactive plate editing",
             "Equirectangular heightmap import with automatic climate simulation",
@@ -337,6 +338,11 @@
                             <option value="continentality">Continentality</option>
                             <option value="tempContinentality">Temp Continentality</option>
                         </optgroup>
+                        <optgroup label="Hydrology">
+                            <option value="riverDischarge">River Discharge</option>
+                            <option value="waterTable">Water Table Depth</option>
+                            <option value="baseflow">Baseflow &amp; Springs</option>
+                        </optgroup>
                         <optgroup label="Elevation">
                             <option value="heightmap">Full Heightmap</option>
                         </optgroup>
@@ -348,6 +354,13 @@
                     <label class="toggle-label"><input type="checkbox" id="chkPlates"><span class="toggle-track"><span class="toggle-thumb"></span></span>Show Plates</label>
                     <label class="toggle-label"><input type="checkbox" id="chkRotate"><span class="toggle-track"><span class="toggle-thumb"></span></span>Auto-Rotate</label>
                     <label class="toggle-label"><input type="checkbox" id="chkGrid" checked><span class="toggle-track"><span class="toggle-thumb"></span></span>Grid Lines</label>
+                    <label class="toggle-label"><input type="checkbox" id="chkWater" checked><span class="toggle-track"><span class="toggle-thumb"></span></span>Rivers &amp; Lakes</label>
+                    <label class="toggle-label"><input type="checkbox" id="chkStreams" checked><span class="toggle-track"><span class="toggle-thumb"></span></span>Small Streams</label>
+                    <div class="cg" id="seasonGroup">
+                        <label>Month <span class="v" id="vMonth">Jul</span></label>
+                        <input type="range" id="sMonth" min="0" max="12" value="6" step="0.01">
+                    </div>
+                    <label class="toggle-label"><input type="checkbox" id="chkSeasonPlay"><span class="toggle-track"><span class="toggle-thumb"></span></span>Animate Seasons</label>
                 </div>
                 <div class="cg" id="gridSpacingGroup">
                     <label>Grid Spacing</label>

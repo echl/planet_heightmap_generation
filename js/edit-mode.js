@@ -5,6 +5,8 @@
 import * as THREE from 'three';
 import { canvas, camera, mapCamera } from './scene.js';
 import { state } from './state.js';
+import { getHydrology } from './hydrology.js';
+import { MONTH_NAMES } from './river-lines.js';
 import { updateHoverHighlight, updateMapHoverHighlight, updatePendingHighlight, updateMapPendingHighlight } from './planet-mesh.js';
 import { KOPPEN_CLASSES } from './koppen.js';
 import { elevToHeightKm } from './color-map.js';
@@ -118,6 +120,34 @@ function buildHoverHTML(region, plate) {
     const elev = d.r_elevation[region];
     const elevKm = elevToHeightKm(elev).toFixed(1);
     lines.push(`<span class="hi-label">Elev</span> ${elevKm} km`);
+
+    // Hydrology (land only): lake, or catchment area and river class
+    if (elev > 0) {
+        const hy = getHydrology(d);
+        if (hy) {
+            if (hy.r_ice && hy.r_ice[region]) {
+                lines.push(`<span class="hi-label">Water</span> Permanent ice (meltwater exits at the margin)`);
+            } else if (hy.r_lake[region]) {
+                lines.push(`<span class="hi-label">Water</span> Lake`);
+            } else if (hy.r_discharge[region] > 0) {
+                const q = hy.r_discharge[region];
+                const qs = q >= 1e6 ? (q / 1e6).toFixed(1) + 'M' : Math.round(q / 1e3) + 'k';
+                const cls = hy.r_river[region];
+                const names = ['', 'Stream', 'River', 'Major river', 'Great river'];
+                lines.push(`<span class="hi-label">Basin</span> ${qs} km²` + (cls ? ` · ${names[cls]}` : ''));
+                if (hy.r_flowMonthly && hy.stats.seasonal && hy.r_flowMax[region] >= 20000) {
+                    const fmt = (v) => v >= 1e6 ? (v / 1e6).toFixed(1) + 'M' : Math.round(v / 1e3) + 'k';
+                    const mi = Math.round(state.seasonMonth == null ? 6 : state.seasonMonth) % 12;
+                    const now = hy.r_flowMonthly[mi][region];
+                    lines.push(`<span class="hi-label">Flow</span> ${now >= 20000 ? fmt(now) + ' km²' : 'dry'} in ${MONTH_NAMES[mi]} · peak ${MONTH_NAMES[hy.r_peakMonth[region]]} ${fmt(hy.r_flowMax[region])}, low ${hy.r_flowMin[region] >= 20000 ? fmt(hy.r_flowMin[region]) : 'dry'}`);
+                }
+                const wt = hy.r_waterTable[region];
+                const sp = hy.r_spring[region];
+                const wtText = wt <= 0 ? 'at surface' : (wt < 0.1 ? Math.round(wt * 1000) + ' m' : wt.toFixed(1) + ' km');
+                lines.push(`<span class="hi-label">Ground</span> water table ${wtText}` + (sp ? (sp === 2 ? ' · Oasis' : ' · Spring') : ''));
+            }
+        }
+    }
 
     // Lat/Lon from r_xyz
     const x = d.r_xyz[3 * region];

@@ -6,6 +6,8 @@ import { state } from './state.js';
 import { elevationToColor, elevToHeightKm, biomeColor } from './color-map.js';
 import { makeRng } from './rng.js';
 import { KOPPEN_CLASSES } from './koppen.js';
+import { getHydrology } from './hydrology.js';
+import { buildGlobeRivers, buildMapRivers, refreshRiverLines } from './river-lines.js';
 
 // Clipping planes for map wrap — keep everything within x ∈ [-2, 2]
 renderer.localClippingEnabled = true;
@@ -280,6 +282,74 @@ function koppenColor(classId) {
 }
 
 // Plate colours — green shades for land, blue for ocean.
+// ── Rivers & lakes ──────────────────────────────────────────────────
+// Rivers/lakes come from hydrology.js (computed lazily from the final elevation and
+// precipitation, cached on state.curData). They tint cell colours in the Terrain and
+// Satellite views, and the "River Discharge" inspect layer shows the raw data.
+const WATER_LAKE = [0.20, 0.43, 0.69];
+const WATER_RIVER = [null, [0.45, 0.66, 0.86], [0.34, 0.58, 0.84], [0.24, 0.49, 0.81], [0.15, 0.40, 0.77]];
+
+// Rivers are drawn as thin ribbons in the live views (river-lines.js); only lakes are filled
+// cells there. `withRivers` also fills river cells, which the exported flat maps still use.
+function makeWaterTint(allowed, withRivers = false) {
+    if (!allowed || !state.showWater || !state.curData) return null;
+    const h = getHydrology(state.curData);
+    if (!h) return null;
+    const { r_lake, r_river } = h;
+    return (br) => (r_lake[br] ? WATER_LAKE : (withRivers ? (WATER_RIVER[r_river[br]] || null) : null));
+}
+
+// Hydrology inspect layers. Each is a per-region Float32Array plus a colour function:
+//   riverDischarge: ocean 0, lake -1, land = log-scaled discharge in [0, 1] (about 2.5e3 .. 1e7 km^2)
+//   waterTable:     ocean 0, lake -1, land = depth to the water table / 0.25 km, clamped to [0, 1]
+//   baseflow:       ocean 0, lake -1, land = log-scaled baseflow in [0, 1] (about 1e2 .. 1e5 km^2);
+//                   springs are 2 and oases 3
+const HYDRO_LAYERS = new Set(['riverDischarge', 'waterTable', 'baseflow']);
+
+function getHydroLayer(curData, kind) {
+    if (!curData || !HYDRO_LAYERS.has(kind)) return null;
+    const h = getHydrology(curData);
+    if (!h) return null;
+    const cache = curData._hydroLayers || (curData._hydroLayers = {});
+    if (cache[kind] && cache[kind].src === h) return cache[kind].arr;
+    const N = curData.mesh.numRegions, e = curData.r_elevation;
+    const arr = new Float32Array(N);
+    const clamp01 = v => (v < 0 ? 0 : (v > 1 ? 1 : v));
+    for (let r = 0; r < N; r++) {
+        if (e[r] <= 0) continue;
+        if (h.r_lake[r]) { arr[r] = -1; continue; }
+        if (kind === 'riverDischarge') {
+            const lo = Math.log10(2500), hi = Math.log10(1e7);
+            arr[r] = clamp01((Math.log10(Math.max(h.r_discharge[r], 1)) - lo) / (hi - lo));
+        } else if (kind === 'waterTable') {
+            arr[r] = clamp01(h.r_waterTable[r] / 0.25);
+        } else {
+            const sp = h.r_spring[r];
+            if (sp) { arr[r] = sp === 2 ? 3 : 2; continue; }
+            const lo = Math.log10(100), hi = Math.log10(1e5);
+            arr[r] = clamp01((Math.log10(Math.max(h.r_baseflow[r], 1)) - lo) / (hi - lo));
+        }
+    }
+    cache[kind] = { src: h, arr };
+    return arr;
+}
+
+function hydroColor(kind, v, elevation) {
+    if (elevation <= 0) return [0.07, 0.12, 0.25];
+    if (v < 0) return [0.95, 0.85, 0.30];                 // lake
+    if (kind === 'waterTable') {
+        const t = Math.pow(v, 0.6);                       // teal at the surface -> brown when deep
+        return [0.20 + 0.22 * t, 0.78 - 0.50 * t, 0.70 - 0.52 * t];
+    }
+    if (kind === 'baseflow') {
+        if (v >= 3) return [1.00, 0.55, 0.10];            // oasis
+        if (v >= 2) return [0.95, 0.20, 0.75];            // spring
+        return [0.24 + 0.06 * v, 0.22 + 0.63 * v, 0.19 + 0.36 * v];   // dark earth -> green
+    }
+    const t = Math.pow(v, 0.8);
+    return [0.42 - 0.24 * t, 0.36 + 0.46 * t, 0.26 + 0.74 * t]; // earth -> bright blue
+}
+
 export function computePlateColors(plateSeeds, plateIsOcean) {
     state.plateColors = {};
     for (const r of plateSeeds) {
@@ -300,6 +370,7 @@ export function computePlateColors(plateSeeds, plateIsOcean) {
 
 // Build equirectangular map mesh.
 export function buildMapMesh() {
+    if (state.riverMapMesh) { state.riverMapMesh.removeFromParent(); state.riverMapMesh.geometry.dispose(); state.riverMapMesh.material.dispose(); state.riverMapMesh = null; }
     if (state.mapMesh) { scene.remove(state.mapMesh); state.mapMesh.geometry.dispose(); state.mapMesh.material.dispose(); state.mapMesh = null; }
     if (!state.curData || !state.mapMode) return;
 
@@ -332,6 +403,8 @@ export function buildMapMesh() {
     const contArr = isCont ? (debugLayers && debugLayers.continentality) : null;
     const isTempCont = debugLayer === 'tempContinentality';
     const tempContArr = isTempCont ? (debugLayers && debugLayers.tempContinentality) : null;
+    const isHydro = HYDRO_LAYERS.has(debugLayer);
+    const hydroArr = isHydro ? getHydroLayer(state.curData, debugLayer) : null;
     if (!isHeightmap && !isLandHeightmap && !isOceanCurrent && !isPrecip && !isRainShadow && !isTemp && !isKoppen && !isBiome && !isCont && !isTempCont && debugLayer && debugLayers && debugLayers[debugLayer]) {
         dbgArr = debugLayers[debugLayer];
         for (let r = 0; r < mesh.numRegions; r++) {
@@ -353,6 +426,7 @@ export function buildMapMesh() {
     }
 
     const biomeSmoothed = (isBiome && koppenArr) ? getCachedBiomeSmoothed(mesh, koppenArr, r_elevation) : null;
+    const waterTint = makeWaterTint(!showPlates && (!debugLayer || isBiome));
     const isSmooth = isHeightmap || isLandHeightmap;
 
     // Upper-bound allocation: wrapping sides produce 2 triangles, non-wrapping 1.
@@ -399,6 +473,8 @@ export function buildMapMesh() {
                 [cr, cg, cb] = oceanCurrentColor(oceanWarmth[br], oceanSpeed[br], r_elevation[br] <= 0);
             } else if (isOceanCurrent) {
                 cr = 0.5; cg = 0; cb = 0.5;
+            } else if (isHydro && hydroArr) {
+                [cr, cg, cb] = hydroColor(debugLayer, hydroArr[br], r_elevation[br]);
             } else if (dbgArr) {
                 [cr, cg, cb] = debugValueToColor(dbgArr[br], dbgMin, dbgMax);
             } else if (showPlates) {
@@ -415,6 +491,7 @@ export function buildMapMesh() {
             } else {
                 [cr, cg, cb] = elevationToColor(re);
             }
+            if (waterTint) { const w = waterTint(br); if (w) { cr = w[0]; cg = w[1]; cb = w[2]; } }
             c0r = c1r = c2r = cr;
             c0g = c1g = c2g = cg;
             c0b = c1b = c2b = cb;
@@ -497,6 +574,7 @@ export function buildMapMesh() {
 
     updateSuperPlateBorders();
     buildMapGrid();
+    buildMapRivers();
 }
 
 // Build lat/lon grid overlay for map view.
@@ -767,6 +845,8 @@ export function buildMesh() {
     const contArr = isCont ? (debugLayers && debugLayers.continentality) : null;
     const isTempCont = debugLayer === 'tempContinentality';
     const tempContArr = isTempCont ? (debugLayers && debugLayers.tempContinentality) : null;
+    const isHydro = HYDRO_LAYERS.has(debugLayer);
+    const hydroArr = isHydro ? getHydroLayer(state.curData, debugLayer) : null;
     if (!isHeightmap && !isLandHeightmap && !isOceanCurrent && !isPrecip && !isRainShadow && !isTemp && !isKoppen && !isBiome && !isCont && !isTempCont && debugLayer && debugLayers && debugLayers[debugLayer]) {
         dbgArr = debugLayers[debugLayer];
         for (let r = 0; r < mesh.numRegions; r++) {
@@ -787,6 +867,7 @@ export function buildMesh() {
     const sideSwapped = new Uint8Array(numSides);
 
     const biomeSmoothed = (isBiome && koppenArr) ? getCachedBiomeSmoothed(mesh, koppenArr, r_elevation) : null;
+    const waterTint = makeWaterTint(!showPlates && (!debugLayer || isBiome));
 
     for (let s = 0; s < numSides; s++) {
         const it = mesh.s_inner_t(s);
@@ -868,6 +949,8 @@ export function buildMesh() {
                 [cr, cg, cb] = landHeightmapColor(r_elevation[br]);
             } else if (isHeightmap) {
                 [cr, cg, cb] = heightmapColor(r_elevation[br]);
+            } else if (isHydro && hydroArr) {
+                [cr, cg, cb] = hydroColor(debugLayer, hydroArr[br], r_elevation[br]);
             } else if (dbgArr) {
                 [cr, cg, cb] = debugValueToColor(dbgArr[br], dbgMin, dbgMax);
             } else if (showPlates) {
@@ -884,6 +967,7 @@ export function buildMesh() {
             } else {
                 [cr, cg, cb] = elevationToColor(re);
             }
+                if (waterTint) { const w = waterTint(br); if (w) { cr = w[0]; cg = w[1]; cb = w[2]; } }
             for (let j = 0; j < 3; j++) {
                 col[off+j*3]   = cr;
                 col[off+j*3+1] = cg;
@@ -944,6 +1028,7 @@ export function buildMesh() {
     // when switching to map view (see viewMode handler in main.js).
     if (state.mapMode) buildMapMesh();
     buildGlobeGrid();
+    buildGlobeRivers();
     if (state.mapMode) {
         state.planetMesh.visible = false;
         waterMesh.visible = false;
@@ -980,6 +1065,7 @@ export function buildMesh() {
 // Use this when switching display modes to avoid GPU memory spikes.
 export function updateMeshColors() {
     if (!state.curData || !state.planetMesh) return;
+    refreshRiverLines();
     const { mesh, r_plate, r_elevation, t_elevation, mountain_r, coastline_r, ocean_r, r_stress, debugLayers } = state.curData;
     const showPlates = document.getElementById('chkPlates').checked;
     const showStress = false;
@@ -1007,6 +1093,8 @@ export function updateMeshColors() {
     const contArr = isCont ? (debugLayers && debugLayers.continentality) : null;
     const isTempCont = debugLayer === 'tempContinentality';
     const tempContArr = isTempCont ? (debugLayers && debugLayers.tempContinentality) : null;
+    const isHydro = HYDRO_LAYERS.has(debugLayer);
+    const hydroArr = isHydro ? getHydroLayer(state.curData, debugLayer) : null;
     if (!isHeightmap && !isLandHeightmap && !isOceanCurrent && !isPrecip && !isRainShadow && !isTemp && !isKoppen && !isBiome && !isCont && !isTempCont && debugLayer && debugLayers && debugLayers[debugLayer]) {
         dbgArr = debugLayers[debugLayer];
         for (let r = 0; r < mesh.numRegions; r++) {
@@ -1017,9 +1105,11 @@ export function updateMeshColors() {
 
     // Precompute smoothed biome colors (one-pass neighbor blend)
     const biomeSmoothed = (isBiome && koppenArr) ? getCachedBiomeSmoothed(mesh, koppenArr, r_elevation) : null;
+    const waterTint = makeWaterTint(!showPlates && (!debugLayer || isBiome));
 
     // Color helper — returns [r,g,b] for a given region
-    const getRegionColor = (br) => {
+    const baseRegionColor = (br) => {
+        if (isHydro && hydroArr) return hydroColor(debugLayer, hydroArr[br], r_elevation[br]);
         if (isBiome && biomeSmoothed) return [biomeSmoothed[br * 3], biomeSmoothed[br * 3 + 1], biomeSmoothed[br * 3 + 2]];
         if (isCont && contArr) return continentalityColor(contArr[br]);
         if (isTempCont && tempContArr) return tempContinentalityColor(tempContArr[br]);
@@ -1047,6 +1137,10 @@ export function updateMeshColors() {
         }
         return elevationToColor(r_elevation[br] - waterLevel);
     };
+
+    const getRegionColor = waterTint
+        ? (br) => waterTint(br) || baseRegionColor(br)
+        : baseRegionColor;
 
     // Update globe mesh colors in-place
     const colorAttr = state.planetMesh.geometry.getAttribute('color');
@@ -1939,6 +2033,7 @@ export async function exportMap(type, width, onProgress) {
     const debugLayers = state.curData.debugLayers;
     const koppenArr = (type === 'biome' || type === 'koppen') ? (debugLayers && debugLayers.koppen) : null;
     const biomeSmoothed = (type === 'biome' && koppenArr) ? getCachedBiomeSmoothed(mesh, koppenArr, r_elevation) : null;
+    const waterTint = makeWaterTint(type === 'color' || type === 'biome', true);
 
     // Build map triangles (same projection as buildMapMesh, chosen coloring, no grid)
     const { numSides, numTriangles } = mesh;
@@ -1989,6 +2084,7 @@ export async function exportMap(type, width, onProgress) {
             } else {
                 [cr, cg, cb] = elevationToColor(r_elevation[br]);
             }
+            if (waterTint) { const w = waterTint(br); if (w) { cr = w[0]; cg = w[1]; cb = w[2]; } }
             c0r = c1r = c2r = cr;
             c0g = c1g = c2g = cg;
             c0b = c1b = c2b = cb;
@@ -2314,6 +2410,7 @@ export async function exportMapBatch(types, width, onProgress) {
         const { type, label } = types[ti];
         const isBW = type === 'heightmap' || type === 'landheightmap' || type === 'landmask';
         const is16Bit = type === 'heightmap' || type === 'landheightmap';
+        const waterTint = makeWaterTint(type === 'color' || type === 'biome', true);
         offScene.background = isBW ? new THREE.Color(0x000000) : new THREE.Color(0x1a1a2e);
 
         // 16-bit heightmaps write to a Uint16Array instead of the canvas
@@ -2346,6 +2443,7 @@ export async function exportMapBatch(types, width, onProgress) {
                 } else {
                     [cr, cg, cb] = elevationToColor(r_elevation[br]);
                 }
+                if (waterTint) { const w = waterTint(br); if (w) { cr = w[0]; cg = w[1]; cb = w[2]; } }
                 colData[off] = colData[off+3] = colData[off+6] = cr;
                 colData[off+1] = colData[off+4] = colData[off+7] = cg;
                 colData[off+2] = colData[off+5] = colData[off+8] = cb;

@@ -32,4 +32,7 @@ export const state = {
     _pendingBackup: null,
     _mapPendingBackup: null,
     importedHeightmap: false,
+    showWater: true,
+    showStreams: true,
+    seasonMonth: 6,
 };

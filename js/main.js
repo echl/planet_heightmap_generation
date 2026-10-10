@@ -9,6 +9,7 @@ import { generate, reapplyViaWorker, computeClimateViaWorker, editRecomputeViaWo
 import { encodePlanetCode, decodePlanetCode } from './planet-code.js';
 import { buildMesh, updateMeshColors, updateSuperPlateBorders, buildMapMesh, rebuildGrids, exportMap, exportMapBatch, buildWindArrows, buildOceanCurrentArrows, updateKoppenHoverHighlight, updateMapKoppenHoverHighlight, updatePendingHighlight, updateMapPendingHighlight } from './planet-mesh.js';
 import { setupEditMode } from './edit-mode.js';
+import { setRiverMonth, MONTH_NAMES } from './river-lines.js';
 import { detailFromSlider, sliderFromDetail } from './detail-scale.js';
 import { KOPPEN_CLASSES } from './koppen.js';
 import { elevationToColor } from './color-map.js';
@@ -406,6 +407,18 @@ function updateLegend(layer) {
         // Rain shadow diverging legend: leeward shadow ↔ neutral ↔ windward boost
         vizLegend.innerHTML = `<div class="legend-gradient" style="background:linear-gradient(to right,rgb(230,51,33) 0%,rgb(140,140,148) 50%,rgb(38,102,243) 100%)"></div>` +
             `<div class="legend-labels"><span>Rain Shadow</span><span>Neutral</span><span>Windward</span></div>`;
+    } else if (layer === 'riverDischarge') {
+        vizLegend.innerHTML = `<div class="legend-gradient" style="background:linear-gradient(to right,rgb(77,66,51) 0%,rgb(51,125,153) 50%,rgb(38,207,255) 100%)"></div>` +
+            `<div class="legend-labels"><span>Small catchment</span><span>River</span><span>Great river</span></div>` +
+            `<div class="legend-labels"><span style="color:#f2d94d">\u25A0 Lake</span><span>Log scale, runoff-weighted km\u00B2</span></div>`;
+    } else if (layer === 'waterTable') {
+        vizLegend.innerHTML = `<div class="legend-gradient" style="background:linear-gradient(to right,rgb(51,199,179) 0%,rgb(76,100,66) 55%,rgb(107,69,46) 100%)"></div>` +
+            `<div class="legend-labels"><span>At surface (valleys)</span><span>Deep (0.25 km+)</span></div>` +
+            `<div class="legend-labels"><span style="color:#f2d94d">\u25A0 Lake</span><span>Depth below the surface</span></div>`;
+    } else if (layer === 'baseflow') {
+        vizLegend.innerHTML = `<div class="legend-gradient" style="background:linear-gradient(to right,rgb(61,56,48) 0%,rgb(76,217,141) 100%)"></div>` +
+            `<div class="legend-labels"><span>Little baseflow</span><span>Strong baseflow</span></div>` +
+            `<div class="legend-labels"><span style="color:#f233bf">\u25A0 Spring</span><span style="color:#ff8c1a">\u25A0 Oasis</span><span style="color:#f2d94d">\u25A0 Lake</span></div>`;
     } else if (layer === 'landheightmap') {
         vizLegend.innerHTML = `<div class="legend-gradient" style="background:linear-gradient(to right,#000 0%,#fff 100%)"></div>` +
             `<div class="legend-labels"><span>Ocean / Sea Level</span><span>Peak</span></div>`;
@@ -638,6 +651,25 @@ seedInput.addEventListener('keydown', (e) => {
 // View-mode checkboxes
 document.getElementById('chkPlates').addEventListener('change', () => { updateMeshColors(); updateSuperPlateBorders(); });
 document.getElementById('chkWire').addEventListener('change', buildMesh);
+document.getElementById('chkWater').addEventListener('change', (e) => { state.showWater = e.target.checked; updateMeshColors(); });
+document.getElementById('chkStreams').addEventListener('change', (e) => { state.showStreams = e.target.checked; updateMeshColors(); });
+
+// Season clock: the month slider scrubs the river ribbons (every month is precached in a texture,
+// so this only moves a uniform); Animate Seasons advances it continuously.
+const sMonth = document.getElementById('sMonth');
+const vMonth = document.getElementById('vMonth');
+function showMonth(m) {
+    setRiverMonth(m);
+    sMonth.value = state.seasonMonth;
+    vMonth.textContent = MONTH_NAMES[Math.round(state.seasonMonth) % 12];
+}
+sMonth.addEventListener('input', () => showMonth(+sMonth.value));
+let _lastSeasonTick = performance.now();
+function tickSeasons() {
+    const now = performance.now(), dt = Math.min(500, now - _lastSeasonTick) / 1000;
+    _lastSeasonTick = now;
+    if (document.getElementById('chkSeasonPlay').checked && !sMonth.disabled) showMonth(state.seasonMonth + dt * 1.0);   // one month per second
+}
 
 // Grid toggle
 const gridSpacingGroup = document.getElementById('gridSpacingGroup');
@@ -1115,6 +1147,7 @@ window.addEventListener('orientationchange', () => {
 // Animation loop
 function animate() {
     requestAnimationFrame(animate);
+    tickSeasons();
     if (state.mapMode) { tickMapZoom(); mapCtrl.update(); } else { tickZoom(); ctrl.update(); }
     if (!state.mapMode && state.planetMesh && document.getElementById('chkRotate').checked) {
         state.planetMesh.rotation.y += 0.0008;
