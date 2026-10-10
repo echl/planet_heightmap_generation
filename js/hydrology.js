@@ -288,13 +288,15 @@ export function computeHydrology(mesh, r_elevation, precipA, precipB, opts) {
     const r_ice = new Uint8Array(N);
     let iceCells = 0, iceMeltKm2 = 0, iceCalvedKm2 = 0;
     const runoffM = [];
+    const snowM = [];                                          // snowpack depth per month (precipitation units)
+    for (let m = 0; m < NM; m++) snowM.push(new Float32Array(N));
     for (let m = 0; m < NM; m++) runoffM.push(new Float32Array(runoff));
     if (hasTemp) {
         for (let r = 0; r < N; r++) {
             if (isOcean[r]) continue;
             const ta = -45 + 90 * tempA[r], tb = -45 + 90 * tempB[r];
             tMean[r] = 0.5 * (ta + tb);
-            if (!r_lake[r] && Math.max(ta, tb) <= H.iceWarmSeasonC) { r_ice[r] = 1; iceCells++; }
+            if (!r_lake[r] && Math.max(ta, tb) <= H.iceWarmSeasonC) { r_ice[r] = 1; iceCells++; for (let m = 0; m < NM; m++) snowM[m][r] = H.snowCap; }
         }
     }
     if (seasonal) {
@@ -322,7 +324,7 @@ export function computeHydrology(mesh, r_elevation, precipA, precipB, opts) {
                         S += P / NM;
                         if (S > H.snowCap) S = H.snowCap;
                     }
-                    if (yr === 1) runoffM[m][r] = w * cellAreaKm2;
+                    if (yr === 1) { runoffM[m][r] = w * cellAreaKm2; snowM[m][r] = S; }
                 }
             }
         }
@@ -560,6 +562,7 @@ export function computeHydrology(mesh, r_elevation, precipA, precipB, opts) {
         r_spring,
         r_ice,
         r_flowMonthly: dischargeM,
+        r_snowMonthly: snowM,
         r_flowMin,
         r_flowMax,
         r_peakMonth,

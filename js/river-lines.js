@@ -16,6 +16,7 @@
 import * as THREE from 'three';
 import { state } from './state.js';
 import { getHydrology, HYDROLOGY } from './hydrology.js';
+import { setSnowMonth } from './snow.js';
 
 const MIN_PX = 1.0;                       // never thinner than this on screen
 const EARTH_KM = 6371;
@@ -303,6 +304,7 @@ export function setRiverMonth(month) {
     const m = ((month % NM) + NM) % NM;
     state.seasonMonth = m;
     shared.month.value = m;
+    setSnowMonth(m);
 }
 
 // Show/hide to match the current layer settings and rebuild if the hydrology changed.

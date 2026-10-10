@@ -34,5 +34,6 @@ export const state = {
     importedHeightmap: false,
     showWater: true,
     showStreams: true,
+    showSnow: true,
     seasonMonth: 6,
 };

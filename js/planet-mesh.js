@@ -8,6 +8,7 @@ import { makeRng } from './rng.js';
 import { KOPPEN_CLASSES } from './koppen.js';
 import { getHydrology } from './hydrology.js';
 import { buildGlobeRivers, buildMapRivers, refreshRiverLines } from './river-lines.js';
+import { applySnowShader, refreshSnow } from './snow.js';
 
 // Clipping planes for map wrap — keep everything within x ∈ [-2, 2]
 renderer.localClippingEnabled = true;
@@ -558,7 +559,12 @@ export function buildMapMesh() {
     geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(finalPos), 3));
     geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(finalCol), 3));
 
+    const regionIds = new Float32Array(triCount * 3);          // per-vertex region, for the snow shader
+    for (let f = 0; f < triCount; f++) { const br = mesh.s_begin_r(faceToSide[f]); regionIds[3 * f] = regionIds[3 * f + 1] = regionIds[3 * f + 2] = br; }
+    geo.setAttribute('regionId', new THREE.BufferAttribute(regionIds, 1));
+
     const mat = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide, clippingPlanes: MAP_CLIP_PLANES });
+    applySnowShader(mat);
     state.mapMesh = new THREE.Mesh(geo, mat);
     state.mapMesh.visible = state.mapMode;
     state.mapMesh._builtCenterLon = state.mapCenterLon || 0;
@@ -865,6 +871,7 @@ export function buildMesh() {
     const isSmooth = isHeightmap || isLandHeightmap;
     // Track per-side winding swaps so updateMeshColors can assign per-vertex colors correctly
     const sideSwapped = new Uint8Array(numSides);
+    const regionIds = new Float32Array(numSides * 3);       // per-vertex region, for the snow shader
 
     const biomeSmoothed = (isBiome && koppenArr) ? getCachedBiomeSmoothed(mesh, koppenArr, r_elevation) : null;
     const waterTint = makeWaterTint(!showPlates && (!debugLayer || isBiome));
@@ -873,6 +880,7 @@ export function buildMesh() {
         const it = mesh.s_inner_t(s);
         const ot = mesh.s_outer_t(s);
         const br = mesh.s_begin_r(s);
+        regionIds[3 * s] = regionIds[3 * s + 1] = regionIds[3 * s + 2] = br;
 
         const re  = r_elevation[br]  - waterLevel;
         const ite = t_elevation[it]  - waterLevel;
@@ -979,6 +987,7 @@ export function buildMesh() {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     geo.setAttribute('color',    new THREE.BufferAttribute(col, 3));
+    geo.setAttribute('regionId', new THREE.BufferAttribute(regionIds, 1));
 
     state._hoverBackup = null;
     state._koppenHoverBackup = null;
@@ -991,8 +1000,10 @@ export function buildMesh() {
             'vec3 objectNormal = normalize(position);'
         );
     };
+    applySnowShader(mat);
     state.planetMesh = new THREE.Mesh(geo, mat);
     scene.add(state.planetMesh);
+    refreshSnow();
 
     waterMesh.visible = !state.mapMode && !showPlates && !showStress && !debugLayer;
 
@@ -1066,6 +1077,7 @@ export function buildMesh() {
 export function updateMeshColors() {
     if (!state.curData || !state.planetMesh) return;
     refreshRiverLines();
+    refreshSnow();
     const { mesh, r_plate, r_elevation, t_elevation, mountain_r, coastline_r, ocean_r, r_stress, debugLayers } = state.curData;
     const showPlates = document.getElementById('chkPlates').checked;
     const showStress = false;

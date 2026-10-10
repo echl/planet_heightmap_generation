@@ -653,6 +653,7 @@ document.getElementById('chkPlates').addEventListener('change', () => { updateMe
 document.getElementById('chkWire').addEventListener('change', buildMesh);
 document.getElementById('chkWater').addEventListener('change', (e) => { state.showWater = e.target.checked; updateMeshColors(); });
 document.getElementById('chkStreams').addEventListener('change', (e) => { state.showStreams = e.target.checked; updateMeshColors(); });
+document.getElementById('chkSnow').addEventListener('change', (e) => { state.showSnow = e.target.checked; updateMeshColors(); });
 
 // Season clock: the month slider scrubs the river ribbons (every month is precached in a texture,
 // so this only moves a uniform); Animate Seasons advances it continuously.
