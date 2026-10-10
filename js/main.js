@@ -3,13 +3,14 @@
 import * as THREE from 'three';
 import { renderer, scene, camera, ctrl, waterMesh, atmosMesh, starsMesh,
          mapCamera, updateMapCameraFrustum, mapCtrl, canvas,
-         tickZoom, tickMapZoom, setAtmosphereScale } from './scene.js';
+         tickZoom, tickMapZoom, setAtmosphereScale, setSunLighting, setSunLongitude, setSunMonth, setShadowsWanted, requestShadowUpdate } from './scene.js';
 import { state } from './state.js';
 import { generate, reapplyViaWorker, computeClimateViaWorker, editRecomputeViaWorker } from './generate.js';
 import { encodePlanetCode, decodePlanetCode } from './planet-code.js';
 import { buildMesh, updateMeshColors, updateSuperPlateBorders, buildMapMesh, rebuildGrids, exportMap, exportMapBatch, buildWindArrows, buildOceanCurrentArrows, updateKoppenHoverHighlight, updateMapKoppenHoverHighlight, updatePendingHighlight, updateMapPendingHighlight } from './planet-mesh.js';
 import { setupEditMode } from './edit-mode.js';
 import { setRiverMonth, MONTH_NAMES } from './river-lines.js';
+import { reliefShade } from './relief.js';
 import { detailFromSlider, sliderFromDetail } from './detail-scale.js';
 import { KOPPEN_CLASSES } from './koppen.js';
 import { elevationToColor } from './color-map.js';
@@ -52,7 +53,7 @@ function reapplyPostProcessing() {
         updatePlanetCode(false);
         // If climate invalidated and viewing a climate layer, switch to Terrain
         if (skipClimate && CLIMATE_LAYERS.has(state.debugLayer)) {
-            state.debugLayer = '';
+            state.debugLayer = ''; applyRealistic();
             if (debugLayerEl) debugLayerEl.value = '';
             syncTabsToLayer('');
             updateMeshColors();
@@ -226,6 +227,7 @@ function switchVisualization(layer) {
 function applyLayer(layer) {
     state.debugLayer = layer;
     state.hoveredKoppen = -1;
+    applyRealistic();
     updateMeshColors();
     // Show/hide wind/ocean arrows
     const isWindLayer = layer === 'pressureSummer' || layer === 'pressureWinter' ||
@@ -557,7 +559,7 @@ genBtn.addEventListener('generate-done', () => updatePlanetCode(false));
 genBtn.addEventListener('generate-done', () => {
     // If climate not computed and current view is a climate layer, switch to Terrain
     if (!state.climateComputed && CLIMATE_LAYERS.has(state.debugLayer)) {
-        state.debugLayer = '';
+        state.debugLayer = ''; applyRealistic();
         if (debugLayerEl) debugLayerEl.value = '';
         syncTabsToLayer('');
         updateMeshColors();
@@ -565,6 +567,7 @@ genBtn.addEventListener('generate-done', () => {
     syncTabsToLayer(state.debugLayer);
     if (debugLayerEl) debugLayerEl.value = state.debugLayer;
     updateLegend(state.debugLayer);
+    applyRealistic();
 
     // Rebuild wind/ocean arrows if a relevant debug layer is active
     const v = state.debugLayer;
@@ -582,7 +585,7 @@ document.addEventListener('plates-edited', () => {
     updatePlanetCode(true);
     // If climate was invalidated and we're viewing a climate layer, switch to Terrain
     if (!state.climateComputed && CLIMATE_LAYERS.has(state.debugLayer)) {
-        state.debugLayer = '';
+        state.debugLayer = ''; applyRealistic();
         if (debugLayerEl) debugLayerEl.value = '';
         syncTabsToLayer('');
         updateMeshColors();
@@ -653,20 +656,43 @@ document.getElementById('chkPlates').addEventListener('change', () => { updateMe
 document.getElementById('chkWire').addEventListener('change', buildMesh);
 document.getElementById('chkWater').addEventListener('change', (e) => { state.showWater = e.target.checked; updateMeshColors(); });
 document.getElementById('chkStreams').addEventListener('change', (e) => { state.showStreams = e.target.checked; updateMeshColors(); });
-document.getElementById('chkRealRelief').addEventListener('change', (e) => {
-    state.realisticRelief = e.target.checked;
+document.getElementById('chkSnow').addEventListener('change', (e) => { state.showSnow = e.target.checked; updateMeshColors(); });
+
+// Realistic mode (Satellite view only). One switch turns on everything that makes the globe look like a
+// real planet: true-scale elevation (and its finer sea sphere), a ray-marched scattering atmosphere of real
+// thickness, a real sun (day side, terminator, dark night side, sun longitude slider, solar declination by
+// month), relief shading from the true slopes, and terrain shadows. Off, it is the original look.
+const chkReal = document.getElementById('chkRealRelief');
+const realisticRow = document.getElementById('realisticRow');
+const sunGroup = document.getElementById('sunGroup');
+const sSunLon = document.getElementById('sSunLon');
+function applyRealistic() {
+    const satellite = state.debugLayer === 'biome';
+    realisticRow.style.display = satellite ? '' : 'none';
+    const eff = satellite && chkReal.checked;
+    sunGroup.style.display = eff ? '' : 'none';
+    reliefShade.value = eff ? 1 : 0;
+    setShadowsWanted(eff);
+    setSunLighting(eff);
+    if (eff === state.realisticRelief) return;
+    state.realisticRelief = eff;
     // The sea sphere's facets dip ~0.0008 below a true sphere, as deep as the realistic relief
     // itself, so a finer sphere is needed to keep the ocean floor from poking through in stripes.
-    const seg = e.target.checked ? 512 : 80;
+    const seg = eff ? 512 : 80;
     waterMesh.geometry.dispose();
     waterMesh.geometry = new THREE.SphereGeometry(1.0, seg, seg);
     // Sea level sits ~0.2 km under the coastline so the sphere's vertices don't z-fight with flat lowland.
-    waterMesh.scale.setScalar(e.target.checked ? 0.99997 : 1);
-    setAtmosphereScale(e.target.checked);
+    waterMesh.scale.setScalar(eff ? 0.99997 : 1);
+    setAtmosphereScale(eff);
     showBuildOverlay();
     setTimeout(() => { buildMesh(); hideBuildOverlay(); }, 50);     // relief moves every globe vertex
+}
+chkReal.addEventListener('change', applyRealistic);
+sSunLon.addEventListener('input', () => {
+    setSunLongitude(+sSunLon.value);
+    document.getElementById('vSunLon').textContent = sSunLon.value + '°';
 });
-document.getElementById('chkSnow').addEventListener('change', (e) => { state.showSnow = e.target.checked; updateMeshColors(); });
+applyRealistic();
 
 // Season clock: the month slider scrubs the river ribbons (every month is precached in a texture,
 // so this only moves a uniform); Animate Seasons advances it continuously.
@@ -674,6 +700,7 @@ const sMonth = document.getElementById('sMonth');
 const vMonth = document.getElementById('vMonth');
 function showMonth(m) {
     setRiverMonth(m);
+    setSunMonth(state.seasonMonth);
     sMonth.value = state.seasonMonth;
     vMonth.textContent = MONTH_NAMES[Math.round(state.seasonMonth) % 12];
 }
@@ -1165,6 +1192,7 @@ function animate() {
     if (state.mapMode) { tickMapZoom(); mapCtrl.update(); } else { tickZoom(); ctrl.update(); }
     if (!state.mapMode && state.planetMesh && document.getElementById('chkRotate').checked) {
         state.planetMesh.rotation.y += 0.0008;
+        requestShadowUpdate();
         waterMesh.rotation.y = state.planetMesh.rotation.y;
         if (state.wireMesh) state.wireMesh.rotation.y = state.planetMesh.rotation.y;
         if (state.arrowGroup) state.arrowGroup.rotation.y = state.planetMesh.rotation.y;

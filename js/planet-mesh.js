@@ -1,7 +1,7 @@
 // Planet mesh construction: Voronoi geometry, map projection, overlays.
 
 import * as THREE from 'three';
-import { renderer, scene, waterMesh, atmosMesh, starsMesh } from './scene.js';
+import { renderer, scene, waterMesh, atmosMesh, starsMesh, requestShadowUpdate } from './scene.js';
 import { state } from './state.js';
 import { elevationToColor, elevToHeightKm, biomeColor } from './color-map.js';
 import { makeRng } from './rng.js';
@@ -9,7 +9,7 @@ import { KOPPEN_CLASSES } from './koppen.js';
 import { getHydrology } from './hydrology.js';
 import { buildGlobeRivers, buildMapRivers, refreshRiverLines } from './river-lines.js';
 import { applySnowShader, refreshSnow } from './snow.js';
-import { reliefDisp } from './relief.js';
+import { reliefDisp, reliefShade, shadeRadius } from './relief.js';
 
 // Clipping planes for map wrap — keep everything within x ∈ [-2, 2]
 renderer.localClippingEnabled = true;
@@ -875,6 +875,11 @@ export function buildMesh() {
     const biomeSmoothed = (isBiome && koppenArr) ? getCachedBiomeSmoothed(mesh, koppenArr, r_elevation) : null;
     const waterTint = makeWaterTint(!showPlates && (!debugLayer || isBiome));
 
+    // Smooth terrain normals for hill-shading: accumulate each triangle's (area-weighted) normal on
+    // its three shared nodes (two Voronoi corners and the cell centre), then average per node.
+    const nodeTN = new Float32Array(t_xyz.length);
+    const nodeRN = new Float32Array(r_xyz.length);
+
     for (let s = 0; s < numSides; s++) {
         const it = mesh.s_inner_t(s);
         const ot = mesh.s_outer_t(s);
@@ -915,6 +920,19 @@ export function buildMesh() {
             v2x=tx; v2y=ty; v2z=tz;
         }
         sideSwapped[s] = swapped ? 1 : 0;
+
+        {   // terrain normal of this triangle from the (always exaggerated) land heights
+            const aD = shadeRadius(ite), bD = shadeRadius(ote), cD = shadeRadius(re);
+            const ax = t_xyz[3*it]*aD, ay = t_xyz[3*it+1]*aD, az = t_xyz[3*it+2]*aD;
+            const bx = t_xyz[3*ot]*bD, by = t_xyz[3*ot+1]*bD, bz = t_xyz[3*ot+2]*bD;
+            const cx = r_xyz[3*br]*cD, cy = r_xyz[3*br+1]*cD, cz = r_xyz[3*br+2]*cD;
+            const ux = bx-ax, uy = by-ay, uz = bz-az, wx = cx-ax, wy = cy-ay, wz = cz-az;
+            let fx = uy*wz-uz*wy, fy = uz*wx-ux*wz, fz = ux*wy-uy*wx;
+            if (fx*(ax+bx+cx) + fy*(ay+by+cy) + fz*(az+bz+cz) < 0) { fx = -fx; fy = -fy; fz = -fz; }
+            nodeTN[3*it] += fx; nodeTN[3*it+1] += fy; nodeTN[3*it+2] += fz;
+            nodeTN[3*ot] += fx; nodeTN[3*ot+1] += fy; nodeTN[3*ot+2] += fz;
+            nodeRN[3*br] += fx; nodeRN[3*br+1] += fy; nodeRN[3*br+2] += fz;
+        }
 
         pos[off]   = v0x; pos[off+1] = v0y; pos[off+2] = v0z;
         pos[off+3] = v1x; pos[off+4] = v1y; pos[off+5] = v1z;
@@ -983,10 +1001,23 @@ export function buildMesh() {
         }
     }
 
+    const shadeN = new Float32Array(numSides * 9);
+    const putN = (o, src, i) => {
+        const x = src[3*i], y = src[3*i+1], z = src[3*i+2], l = Math.hypot(x, y, z) || 1;
+        shadeN[o] = x / l; shadeN[o+1] = y / l; shadeN[o+2] = z / l;
+    };
+    for (let s = 0; s < numSides; s++) {
+        const it = mesh.s_inner_t(s), ot = mesh.s_outer_t(s), br = mesh.s_begin_r(s), o = s * 9;
+        putN(o, nodeTN, it);                                                   // vertex 0 is always inner_t
+        if (sideSwapped[s]) { putN(o+3, nodeRN, br); putN(o+6, nodeTN, ot); }  // winding swapped v1/v2
+        else                { putN(o+3, nodeTN, ot); putN(o+6, nodeRN, br); }
+    }
+
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     geo.setAttribute('color',    new THREE.BufferAttribute(col, 3));
     geo.setAttribute('regionId', new THREE.BufferAttribute(regionIds, 1));
+    geo.setAttribute('shadeNormal', new THREE.BufferAttribute(shadeN, 3));
 
     state._hoverBackup = null;
     state._koppenHoverBackup = null;
@@ -994,14 +1025,17 @@ export function buildMesh() {
 
     const mat = new THREE.MeshLambertMaterial({ vertexColors: true });
     mat.onBeforeCompile = (shader) => {
-        shader.vertexShader = shader.vertexShader.replace(
-            '#include <beginnormal_vertex>',
-            'vec3 objectNormal = normalize(position);'
-        );
+        shader.uniforms.reliefShade = reliefShade;
+        shader.vertexShader = shader.vertexShader
+            .replace('#include <common>', '#include <common>\nattribute vec3 shadeNormal;\nuniform float reliefShade;')
+            .replace('#include <beginnormal_vertex>',
+                'vec3 objectNormal = normalize(mix(normalize(position), shadeNormal, reliefShade));');
     };
     applySnowShader(mat);
     state.planetMesh = new THREE.Mesh(geo, mat);
+    state.planetMesh.castShadow = state.planetMesh.receiveShadow = true;   // used only with Realistic Elevation
     scene.add(state.planetMesh);
+    requestShadowUpdate();
     refreshSnow();
 
     waterMesh.visible = !state.mapMode && !showPlates && !showStress && !debugLayer;

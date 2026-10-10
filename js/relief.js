@@ -20,3 +20,15 @@ export function reliefDisp(e, lift = 0) {
     }
     return 1 + (e > 0 ? e * EXAGGERATION : e * EXAGGERATION * 0.3) + lift;
 }
+
+// Hill-shading. The globe is shaded with normals computed from the slope of the land surface, using
+// the same heights as the geometry: exaggerated slopes by default, and the true (shallow, a degree
+// or so on average) slopes with Realistic Elevation on. Shallow slopes barely show in full daylight
+// but matter near the terminator, where the sun grazes the surface and a small tilt changes N.L a
+// lot, so they darken the far sides of hills and brighten the near sides there.
+// 1 = shaded, 0 = smooth sphere.
+export const reliefShade = { value: 1 };
+export function shadeRadius(e) {
+    const h = e > 0 ? e : 0;                                   // the sea sphere covers the ocean floor
+    return state.realisticRelief ? 1 + elevToHeightKm(h) / EARTH_KM : 1 + EXAGGERATION * h;
+}

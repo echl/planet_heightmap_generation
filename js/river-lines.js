@@ -17,6 +17,7 @@ import * as THREE from 'three';
 import { state } from './state.js';
 import { getHydrology, HYDROLOGY } from './hydrology.js';
 import { setSnowMonth } from './snow.js';
+import { sunUniforms, shadowUniforms, sun } from './scene.js';
 import { reliefDisp } from './relief.js';
 
 const MIN_PX = 1.0;                       // never thinner than this on screen
@@ -55,9 +56,12 @@ uniform vec3 colBig;
 uniform vec2 viewport;      // CSS pixels
 uniform float unitsPerKm;
 uniform float minPx;
-uniform float depthBias;
+uniform float depthBias;     // world units toward the camera (globe); 0 on the map
 varying vec3 vColor;
 varying float vWx;
+varying vec3 vN;            // world-space surface normal (globe: radial)
+varying vec3 vWp;           // world position (for the shadow lookup)
+uniform float lit;
 float qAt(float seg, int m) {
     int idx = int(seg) * 12 + m;
     int w = int(texW);
@@ -77,8 +81,13 @@ void main() {
     float widthKm = widthK * sqrt(Q / 1.0e6);
     float f = clamp((log(Q) / 2.302585 - qLo) / (7.0 - qLo), 0.0, 1.0);
     vColor = mix(colSmall, colBig, f);
-    vec4 cA = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-    vec4 cB = projectionMatrix * modelViewMatrix * vec4(posB, 1.0);
+    // Nudge toward the camera in view space (a distance, not a depth-buffer fraction), so the ribbon
+    // clears the terrain triangles under it but is still hidden by mountains in front of it.
+    vec4 mvA = modelViewMatrix * vec4(position, 1.0); mvA.z += depthBias;
+    vec4 mvB = modelViewMatrix * vec4(posB, 1.0);     mvB.z += depthBias;
+    vec4 cA = projectionMatrix * mvA;
+    vec4 cB = projectionMatrix * mvB;
+    vN = lit > 0.5 ? normalize(mat3(modelMatrix) * normalize(mix(position, posB, corner.x))) : vec3(0.0);
     vec2 sA = cA.xy / cA.w * viewport * 0.5;
     vec2 sB = cB.xy / cB.w * viewport * 0.5;
     vec2 d = sB - sA;
@@ -91,22 +100,46 @@ void main() {
     float halfPx = max(0.5 * minPx, 0.5 * widthKm * unitsPerKm * pxPerUnit);
     vec2 off = n * corner.y * halfPx + d * (corner.x * 2.0 - 1.0) * halfPx;   // square caps close the joints
     c.xy += off / (viewport * 0.5) * c.w;
-    c.z -= depthBias * c.w;
-    vWx = (modelMatrix * vec4(mix(position, posB, corner.x), 1.0)).x;
+    vec4 wp = modelMatrix * vec4(mix(position, posB, corner.x), 1.0);
+    vWx = wp.x; vWp = wp.xyz;
     gl_Position = c;
 }`;
 
 const FRAG = `
 uniform float clipX;
+uniform vec3 sunDir;
+uniform vec3 sunRGB;
+uniform vec3 ambRGB;
+uniform float dayOnly;
+uniform float lit;
 varying vec3 vColor;
 varying float vWx;
+varying vec3 vN;
+varying vec3 vWp;
+uniform sampler2D shadowMap;
+uniform mat4 shadowMat;
+uniform float shadowOn;
+#include <packing>
 void main() {
     if (clipX > 0.0 && abs(vWx) > clipX) discard;
-    gl_FragColor = vec4(vColor, 1.0);
+    vec3 col = vColor;
+    if (lit > 0.5 && dayOnly > 0.5) {                          // Realistic mode only; otherwise the original flat colour
+        float d = max(dot(normalize(vN), sunDir), 0.0);
+        if (shadowOn > 0.5) {                                   // same shadow map as the terrain
+            vec4 sc = shadowMat * vec4(vWp, 1.0);
+            sc.xyz /= sc.w;
+            if (sc.x >= 0.0 && sc.x <= 1.0 && sc.y >= 0.0 && sc.y <= 1.0 && sc.z <= 1.0) {
+                float depth = unpackRGBAToDepth(texture2D(shadowMap, sc.xy));
+                d *= (sc.z - 0.00006 <= depth) ? 1.0 : 0.0;
+            }
+        }
+        col *= (ambRGB + sunRGB * d) / 3.14159265;
+    }
+    gl_FragColor = vec4(col, 1.0);
     #include <colorspace_fragment>
 }`;
 
-function makeMaterial(unitsPerKm, depthBias, clipX, qTex) {
+function makeMaterial(unitsPerKm, depthBias, clipX, qTex, lit) {
     return new THREE.ShaderMaterial({
         uniforms: {
             ...shared,
@@ -117,6 +150,9 @@ function makeMaterial(unitsPerKm, depthBias, clipX, qTex) {
             minPx: { value: MIN_PX },
             depthBias: { value: depthBias },
             clipX: { value: clipX },
+            lit: { value: lit ? 1 : 0 },
+            ...sunUniforms,
+            ...shadowUniforms,
         },
         vertexShader: VERT,
         fragmentShader: FRAG,
@@ -169,7 +205,10 @@ function makeRibbonMesh(segs, makeMat) {
     mesh.raycast = () => {};          // never intercept hover picking
     mesh.renderOrder = 2;
     const v2 = new THREE.Vector2();
-    mesh.onBeforeRender = (r) => { r.getSize(v2); material.uniforms.viewport.value.copy(v2); };
+    mesh.onBeforeRender = (r) => {
+        r.getSize(v2); material.uniforms.viewport.value.copy(v2);
+        if (sun.shadow.map) shadowUniforms.shadowMap.value = sun.shadow.map.texture;   // exists once the first shadow pass ran
+    };
     return mesh;
 }
 
@@ -243,7 +282,7 @@ export function buildGlobeRivers() {
         segs.pb.push(e[0] * dB, e[1] * dB, e[2] * dB);
         segs.q.set(L.q, i * NM);
     });
-    const mesh = makeRibbonMesh(segs, (tex) => makeMaterial(1 / EARTH_KM, 0.004, 0, tex));
+    const mesh = makeRibbonMesh(segs, (tex) => makeMaterial(1 / EARTH_KM, state.realisticRelief ? 0.0006 : 0.006, 0, tex, true));
     mesh.visible = riverLinesWanted();
     state.planetMesh.add(mesh);          // child of the planet, so it follows auto-rotation
     state.riverGlobeMesh = mesh;
@@ -279,7 +318,7 @@ export function buildMapRivers() {
     segs.q = new Float32Array(qs.length * NM);
     qs.forEach((q, i) => segs.q.set(q, i * NM));
     // Map x units per km along the equator (x spans 4 units over 2*pi*R km).
-    const mesh = makeRibbonMesh(segs, (tex) => makeMaterial(MAP_SX / EARTH_KM, 0, 2, tex));
+    const mesh = makeRibbonMesh(segs, (tex) => makeMaterial(MAP_SX / EARTH_KM, 0, 2, tex, false));
     mesh.visible = riverLinesWanted();
     const mat = mesh.material;
     // Wrap clones for smooth longitude scrolling (the parent's translation applies too).
