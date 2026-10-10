@@ -47,8 +47,56 @@ const BIOME_COLORS = [
     [0.78, 0.80, 0.84],         // 30 EF   Ice cap — blue-tinted white
 ];
 
+
+// Realistic palette (Realistic mode): muted, natural satellite colours instead of the saturated map
+// colours above. Index = Koeppen class, as BIOME_COLORS.
+const REAL_BIOME_COLORS = [
+    null,
+    [0.035, 0.150, 0.045],      //  1 Af   rainforest
+    [0.050, 0.170, 0.050],      //  2 Am   monsoon forest
+    [0.400, 0.380, 0.150],      //  3 Aw   savanna
+    [0.690, 0.545, 0.340],      //  4 BWh  hot desert
+    [0.520, 0.440, 0.350],      //  5 BWk  cold desert
+    [0.560, 0.470, 0.250],      //  6 BSh  hot steppe
+    [0.470, 0.420, 0.260],      //  7 BSk  cold steppe
+    [0.130, 0.250, 0.075],      //  8 Cfa  humid subtropical
+    [0.090, 0.210, 0.070],      //  9 Cfb  oceanic
+    [0.070, 0.170, 0.075],      // 10 Cfc
+    [0.340, 0.320, 0.165],      // 11 Csa  Mediterranean
+    [0.290, 0.300, 0.150],      // 12 Csb
+    [0.250, 0.270, 0.150],      // 13 Csc
+    [0.140, 0.270, 0.085],      // 14 Cwa
+    [0.110, 0.240, 0.080],      // 15 Cwb
+    [0.090, 0.200, 0.075],      // 16 Cwc
+    [0.090, 0.210, 0.060],      // 17 Dfa  continental forest
+    [0.075, 0.185, 0.060],      // 18 Dfb
+    [0.045, 0.120, 0.060],      // 19 Dfc  taiga
+    [0.040, 0.100, 0.055],      // 20 Dfd
+    [0.300, 0.290, 0.150],      // 21 Dsa
+    [0.275, 0.270, 0.145],      // 22 Dsb
+    [0.060, 0.140, 0.065],      // 23 Dsc
+    [0.045, 0.110, 0.055],      // 24 Dsd
+    [0.110, 0.230, 0.075],      // 25 Dwa
+    [0.095, 0.200, 0.065],      // 26 Dwb
+    [0.055, 0.135, 0.065],      // 27 Dwc
+    [0.040, 0.105, 0.055],      // 28 Dwd
+    [0.330, 0.320, 0.270],      // 29 ET   tundra
+    [0.840, 0.860, 0.890],      // 30 EF   ice cap
+];
+const REAL_ROCK_COLOR = [0.360, 0.320, 0.285];
+
+// Realistic ocean colour from depth: turquoise over the shelf, fading to deep navy (the water column
+// absorbs red first, then green). The sea sphere on top is nearly clear in Realistic mode.
+export function realisticOceanColor(elevation) {
+    const dKm = Math.max(0, -elevToHeightKm(elevation));
+    const t = Math.exp(-dKm / 0.35);                       // 1 in the shallows, ~0 below 1.5 km
+    const u = Math.exp(-dKm / 0.03);                       // very shallow: sand shows through
+    const deep = [0.010, 0.050, 0.135], shelf = [0.075, 0.330, 0.430], sand = [0.230, 0.450, 0.470];
+    return [0, 1, 2].map(i => deep[i] + (shelf[i] - deep[i]) * t + (sand[i] - shelf[i]) * u * 0.55);
+}
+
 // Rocky/alpine mountain color for high-elevation blending.
-const ROCK_COLOR = [0.42, 0.38, 0.32];
+const DEFAULT_ROCK_COLOR = [0.42, 0.38, 0.32];
 
 // Altitude thresholds (km) by Köppen group:
 //   [alpine line, snow line]
@@ -68,11 +116,12 @@ function altitudeThresholds(classId) {
 
 // Satellite-view biome color: realistic land colors based on Köppen class
 // and elevation, with ocean delegated to the standard ocean palette.
-export function biomeColor(koppenId, elevation) {
+export function biomeColor(koppenId, elevation, realistic = false) {
     // Ocean
-    if (koppenId === 0 || elevation <= 0) return elevationToColor(elevation);
+    if (koppenId === 0 || elevation <= 0) return realistic ? realisticOceanColor(elevation) : elevationToColor(elevation);
 
-    const base = BIOME_COLORS[koppenId] || [0.30, 0.50, 0.20];
+    const base = (realistic ? REAL_BIOME_COLORS : BIOME_COLORS)[koppenId] || [0.30, 0.50, 0.20];
+    const ROCK_COLOR = realistic ? REAL_ROCK_COLOR : DEFAULT_ROCK_COLOR;
     const hKm = elevToHeightKm(elevation);
     const [alpineLine, snowLine] = altitudeThresholds(koppenId);
 

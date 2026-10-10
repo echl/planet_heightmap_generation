@@ -11,6 +11,7 @@ import { buildMesh, updateMeshColors, updateSuperPlateBorders, buildMapMesh, reb
 import { setupEditMode } from './edit-mode.js';
 import { setRiverMonth, MONTH_NAMES } from './river-lines.js';
 import { reliefShade } from './relief.js';
+import { applyRealisticOcean, tickRealistic } from './realistic.js';
 import { detailFromSlider, sliderFromDetail } from './detail-scale.js';
 import { KOPPEN_CLASSES } from './koppen.js';
 import { elevationToColor } from './color-map.js';
@@ -684,9 +685,13 @@ function applyRealistic() {
     // Sea level sits ~0.2 km under the coastline so the sphere's vertices don't z-fight with flat lowland.
     waterMesh.scale.setScalar(eff ? 0.99997 : 1);
     setAtmosphereScale(eff);
+    waterMesh.material.opacity = eff ? 0.24 : 0.55;                // clearer sea: the depth-coloured floor shows through
+    waterMesh.material.color.setHex(eff ? 0x082a4a : 0x0c3a6e);
     showBuildOverlay();
     setTimeout(() => { buildMesh(); hideBuildOverlay(); }, 50);     // relief moves every globe vertex
 }
+applyRealisticOcean(waterMesh.material);
+waterMesh.renderOrder = -2;
 chkReal.addEventListener('change', applyRealistic);
 sSunLon.addEventListener('input', () => {
     setSunLongitude(+sSunLon.value);
@@ -1189,6 +1194,7 @@ window.addEventListener('orientationchange', () => {
 function animate() {
     requestAnimationFrame(animate);
     tickSeasons();
+    tickRealistic();
     if (state.mapMode) { tickMapZoom(); mapCtrl.update(); } else { tickZoom(); ctrl.update(); }
     if (!state.mapMode && state.planetMesh && document.getElementById('chkRotate').checked) {
         state.planetMesh.rotation.y += 0.0008;

@@ -11,6 +11,7 @@
 import * as THREE from 'three';
 import { state } from './state.js';
 import { getHydrology, HYDROLOGY } from './hydrology.js';
+import { realUniforms } from './realistic.js';
 
 const NM = 12;
 const TEX_W = 4096;
@@ -28,11 +29,12 @@ export const snowUniforms = {
     snowTexW: { value: 1 },
     snowMonth: { value: 6 },
     snowOn: { value: 0 },
+    snowRagged: realUniforms.realFx,      // Realistic mode: ragged, noise-broken snow edges (done in the fragment shader)
 };
 
 let _cache = null;     // { key..., tex }
 
-function buildTexture(curData, h) {
+function buildTexture(curData, h, smooth) {
     const mesh = curData.mesh, N = mesh.numRegions, e = curData.r_elevation;
     const koppen = (curData.debugLayers && curData.debugLayers.koppen) || null;
     const ta = curData.r_temperature_summer || null, tb = curData.r_temperature_winter || null;
@@ -59,6 +61,18 @@ function buildTexture(curData, h) {
             }
         }
     }
+    if (smooth) {   // Realistic mode: bleed cover into neighbouring cells so the shader can rag the edge with noise
+        const src = data.slice(), { adjOffset, adjList } = mesh;
+        for (let r = 0; r < N; r++) {
+            const a = adjOffset[r], b = adjOffset[r + 1];
+            if (b === a) continue;
+            for (let m = 0; m < NM; m++) {
+                let sum = 0;
+                for (let i = a; i < b; i++) sum += src[adjList[i] * NM + m];
+                data[r * NM + m] = Math.round(0.5 * src[r * NM + m] + 0.5 * sum / (b - a));
+            }
+        }
+    }
     const tex = new THREE.DataTexture(data, TEX_W, rows, THREE.RedFormat, THREE.UnsignedByteType);
     tex.minFilter = THREE.NearestFilter; tex.magFilter = THREE.NearestFilter;
     tex.generateMipmaps = false; tex.needsUpdate = true;
@@ -76,9 +90,9 @@ export function refreshSnow() {
         if (!h || !h.r_snowMonthly) on = false;
         else {
             const koppen = cd.debugLayers && cd.debugLayers.koppen, ta = cd.r_temperature_summer, tb = cd.r_temperature_winter;
-            if (!_cache || _cache.h !== h || _cache.koppen !== koppen || _cache.ta !== ta || _cache.tb !== tb || _cache.e !== cd.r_elevation) {
+            if (!_cache || _cache.h !== h || _cache.koppen !== koppen || _cache.ta !== ta || _cache.tb !== tb || _cache.e !== cd.r_elevation || _cache.smooth !== !!state.realisticRelief) {
                 if (_cache && _cache.tex) _cache.tex.dispose();
-                _cache = { h, koppen, ta, tb, e: cd.r_elevation, tex: buildTexture(cd, h) };
+                _cache = { h, koppen, ta, tb, e: cd.r_elevation, smooth: !!state.realisticRelief, tex: buildTexture(cd, h, !!state.realisticRelief) };
             }
             snowUniforms.snowTex.value = _cache.tex;
             snowUniforms.snowTexW.value = TEX_W;
@@ -102,6 +116,8 @@ uniform highp sampler2D snowTex;
 uniform float snowTexW;
 uniform float snowMonth;
 uniform float snowOn;
+uniform float snowRagged;
+varying float vSnow;
 float snowAt(int r, int m) {
     int idx = r * 12 + m;
     int w = int(snowTexW);
@@ -115,8 +131,8 @@ if (snowOn > 0.5) {
     int m0 = int(mod(m0f, 12.0));
     int m1 = (m0 + 1) % 12;
     float cover = mix(snowAt(int(regionId), m0), snowAt(int(regionId), m1), fr);
-    vColor = mix(vColor, vec3(0.92, 0.95, 0.99), cover * 0.95);
-}
+    if (snowRagged > 0.5) vSnow = cover; else vColor = mix(vColor, vec3(0.92, 0.95, 0.99), cover * 0.95);
+} else vSnow = 0.0;
 #endif`);
     };
     const type = mat.type;

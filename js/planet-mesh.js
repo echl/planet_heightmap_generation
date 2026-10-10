@@ -9,6 +9,7 @@ import { KOPPEN_CLASSES } from './koppen.js';
 import { getHydrology } from './hydrology.js';
 import { buildGlobeRivers, buildMapRivers, refreshRiverLines } from './river-lines.js';
 import { applySnowShader, refreshSnow } from './snow.js';
+import { applyRealisticTerrain } from './realistic.js';
 import { reliefDisp, reliefShade, shadeRadius } from './relief.js';
 
 // Clipping planes for map wrap — keep everything within x ∈ [-2, 2]
@@ -23,19 +24,21 @@ const MAP_CLIP_PLANES = [
 // Cached on state to avoid redundant computation across render paths.
 let _biomeCache = null;
 let _biomeCacheKey = null;
+let _biomeCacheReal = false;
 
 function getCachedBiomeSmoothed(mesh, koppenArr, r_elevation) {
-    if (_biomeCache && _biomeCacheKey === koppenArr) return _biomeCache;
-    _biomeCache = smoothBiomeColors(mesh, koppenArr, r_elevation);
-    _biomeCacheKey = koppenArr;
+    const key = koppenArr, real = !!state.realisticRelief;
+    if (_biomeCache && _biomeCacheKey === key && _biomeCacheReal === real) return _biomeCache;
+    _biomeCache = smoothBiomeColors(mesh, koppenArr, r_elevation, real);
+    _biomeCacheKey = key; _biomeCacheReal = real;
     return _biomeCache;
 }
 
-function smoothBiomeColors(mesh, koppenArr, r_elevation) {
+function smoothBiomeColors(mesh, koppenArr, r_elevation, real = false) {
     const n = mesh.numRegions;
     const raw = new Float32Array(n * 3);
     for (let r = 0; r < n; r++) {
-        const [cr, cg, cb] = biomeColor(koppenArr[r], r_elevation[r]);
+        const [cr, cg, cb] = biomeColor(koppenArr[r], r_elevation[r], real);
         raw[r * 3] = cr; raw[r * 3 + 1] = cg; raw[r * 3 + 2] = cb;
     }
     const out = new Float32Array(n * 3);
@@ -60,6 +63,31 @@ function smoothBiomeColors(mesh, koppenArr, r_elevation) {
         out[r * 3 + 2] = raw[r * 3 + 2] * (1 - alpha) + avgB * alpha;
     }
     return out;
+}
+
+// Realistic mode: soften the hex tiling by giving each Voronoi corner the average colour of the
+// cells that meet there (land and ocean averaged separately, so coastlines stay crisp).
+function blendCornerColors(col, mesh, sideSwapped, r_elevation, waterLevel) {
+    const { numSides, numTriangles } = mesh;
+    const nL = new Float32Array(numTriangles * 4), nO = new Float32Array(numTriangles * 4);
+    // centre colour is vertex index of br: swapped ? o+3 : o+6
+    for (let s = 0; s < numSides; s++) {
+        const it = mesh.s_inner_t(s), br = mesh.s_begin_r(s), o = s * 9, c = sideSwapped[s] ? o + 3 : o + 6;
+        const acc = (r_elevation[br] - waterLevel) > 0 ? nL : nO;
+        acc[4*it] += col[c]; acc[4*it+1] += col[c+1]; acc[4*it+2] += col[c+2]; acc[4*it+3] += 1;
+    }
+    for (let s = 0; s < numSides; s++) {
+        const it = mesh.s_inner_t(s), ot = mesh.s_outer_t(s), br = mesh.s_begin_r(s), o = s * 9;
+        const c = sideSwapped[s] ? o + 3 : o + 6, k = sideSwapped[s] ? o + 6 : o + 3;
+        const land = (r_elevation[br] - waterLevel) > 0, acc = land ? nL : nO;
+        const own = [col[c], col[c+1], col[c+2]];
+        const set = (idx, t) => {
+            const n = acc[4*t+3];
+            if (n > 0) for (let j = 0; j < 3; j++) col[idx+j] = acc[4*t+j] / n;
+        };
+        set(o, it); set(k, ot);
+        col[c] = own[0]; col[c+1] = own[1]; col[c+2] = own[2];
+    }
 }
 
 // Grayscale heightmap: black (lowest) → white (highest), in physical height space
@@ -1001,6 +1029,8 @@ export function buildMesh() {
         }
     }
 
+    if (isBiome && biomeSmoothed && state.realisticRelief) blendCornerColors(col, mesh, sideSwapped, r_elevation, waterLevel);
+
     const shadeN = new Float32Array(numSides * 9);
     const putN = (o, src, i) => {
         const x = src[3*i], y = src[3*i+1], z = src[3*i+2], l = Math.hypot(x, y, z) || 1;
@@ -1032,6 +1062,7 @@ export function buildMesh() {
                 'vec3 objectNormal = normalize(mix(normalize(position), shadeNormal, reliefShade));');
     };
     applySnowShader(mat);
+    applyRealisticTerrain(mat);
     state.planetMesh = new THREE.Mesh(geo, mat);
     state.planetMesh.castShadow = state.planetMesh.receiveShadow = true;   // used only with Realistic Elevation
     scene.add(state.planetMesh);
@@ -1220,6 +1251,7 @@ export function updateMeshColors() {
             }
         }
     }
+    if (isBiome && biomeSmoothed && sideSwapped && state.realisticRelief) blendCornerColors(colors, mesh, sideSwapped, r_elevation, 0);
     colorAttr.needsUpdate = true;
     state._hoverBackup = null;
     state._koppenHoverBackup = null;
