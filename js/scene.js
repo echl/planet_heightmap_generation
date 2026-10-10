@@ -80,13 +80,30 @@ export let starsMesh;
 
 // Atmosphere
 const atmosMat = new THREE.ShaderMaterial({
-    uniforms:{c:{value:new THREE.Color(0.35,0.6,1.0)}},
+    uniforms:{c:{value:new THREE.Color(0.35,0.6,1.0)}, fade:{value:1}},
     vertexShader:`varying vec3 vN,vP;void main(){vN=normalize(normalMatrix*normal);vP=(modelViewMatrix*vec4(position,1)).xyz;gl_Position=projectionMatrix*vec4(vP,1);}`,
-    fragmentShader:`uniform vec3 c;varying vec3 vN,vP;void main(){float r=1.0-max(0.0,dot(normalize(-vP),vN));gl_FragColor=vec4(c,pow(r,3.5)*0.55);}`,
+    fragmentShader:`uniform vec3 c;uniform float fade;varying vec3 vN,vP;void main(){float r=1.0-max(0.0,dot(normalize(-vP),vN));gl_FragColor=vec4(c,pow(r,3.5)*0.55*fade);}`,
     transparent:true,side:THREE.FrontSide,depthWrite:false
 });
 export const atmosMesh = new THREE.Mesh(new THREE.SphereGeometry(1.12,64,64), atmosMat);
 scene.add(atmosMesh);
+
+// Atmosphere size. Real: ~100 km (the Karman line) on a 6371 km planet, so a shell of radius
+// 1.0157. With exaggerated relief it is scaled by the same factor as the relief (0.04 radius per
+// 6 km of height, about 42x), so it keeps the same proportion to the mountains it sits above.
+const ATMOS_BASE_RADIUS = 1.12;                                  // radius of the geometry above
+const ATMOS_THICKNESS = 100 / 6371;
+const RELIEF_EXAGGERATION = 0.04 / (6 / 6371);
+export function setAtmosphereScale(realistic) {
+    const radius = realistic ? 1 + ATMOS_THICKNESS : ATMOS_BASE_RADIUS;  // non-realistic: original size
+    atmosMesh.scale.setScalar(radius / ATMOS_BASE_RADIUS);
+}
+// Fade the shell out as the camera enters it (back faces are culled, so it would pop otherwise).
+atmosMesh.onBeforeRender = (r, sc, cam) => {
+    const R = ATMOS_BASE_RADIUS * atmosMesh.scale.x;
+    atmosMat.uniforms.fade.value = THREE.MathUtils.smoothstep(cam.position.length(), R * 0.92, R * 1.04);
+};
+setAtmosphereScale(false);
 
 // Water sphere
 const waterMat = new THREE.MeshPhongMaterial({

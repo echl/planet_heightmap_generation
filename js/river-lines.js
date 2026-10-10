@@ -17,6 +17,7 @@ import * as THREE from 'three';
 import { state } from './state.js';
 import { getHydrology, HYDROLOGY } from './hydrology.js';
 import { setSnowMonth } from './snow.js';
+import { reliefDisp } from './relief.js';
 
 const MIN_PX = 1.0;                       // never thinner than this on screen
 const EARTH_KM = 6371;
@@ -203,8 +204,7 @@ function endpointDir(curData, link) {
     return [mx / l, my / l, mz / l];
 }
 
-const V = 0.04;     // must match the globe displacement in buildMesh
-function disp(e) { return 1.0 + (e > 0 ? e * V : e * V * 0.3) + LIFT; }
+function disp(e) { return reliefDisp(e, LIFT); }
 
 function disposePart(key) {
     const m = state[key];

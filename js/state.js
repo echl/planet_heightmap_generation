@@ -35,5 +35,6 @@ export const state = {
     showWater: true,
     showStreams: true,
     showSnow: true,
+    realisticRelief: false,
     seasonMonth: 6,
 };

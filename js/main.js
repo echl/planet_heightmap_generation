@@ -3,7 +3,7 @@
 import * as THREE from 'three';
 import { renderer, scene, camera, ctrl, waterMesh, atmosMesh, starsMesh,
          mapCamera, updateMapCameraFrustum, mapCtrl, canvas,
-         tickZoom, tickMapZoom } from './scene.js';
+         tickZoom, tickMapZoom, setAtmosphereScale } from './scene.js';
 import { state } from './state.js';
 import { generate, reapplyViaWorker, computeClimateViaWorker, editRecomputeViaWorker } from './generate.js';
 import { encodePlanetCode, decodePlanetCode } from './planet-code.js';
@@ -653,6 +653,19 @@ document.getElementById('chkPlates').addEventListener('change', () => { updateMe
 document.getElementById('chkWire').addEventListener('change', buildMesh);
 document.getElementById('chkWater').addEventListener('change', (e) => { state.showWater = e.target.checked; updateMeshColors(); });
 document.getElementById('chkStreams').addEventListener('change', (e) => { state.showStreams = e.target.checked; updateMeshColors(); });
+document.getElementById('chkRealRelief').addEventListener('change', (e) => {
+    state.realisticRelief = e.target.checked;
+    // The sea sphere's facets dip ~0.0008 below a true sphere, as deep as the realistic relief
+    // itself, so a finer sphere is needed to keep the ocean floor from poking through in stripes.
+    const seg = e.target.checked ? 512 : 80;
+    waterMesh.geometry.dispose();
+    waterMesh.geometry = new THREE.SphereGeometry(1.0, seg, seg);
+    // Sea level sits ~0.2 km under the coastline so the sphere's vertices don't z-fight with flat lowland.
+    waterMesh.scale.setScalar(e.target.checked ? 0.99997 : 1);
+    setAtmosphereScale(e.target.checked);
+    showBuildOverlay();
+    setTimeout(() => { buildMesh(); hideBuildOverlay(); }, 50);     // relief moves every globe vertex
+});
 document.getElementById('chkSnow').addEventListener('change', (e) => { state.showSnow = e.target.checked; updateMeshColors(); });
 
 // Season clock: the month slider scrubs the river ribbons (every month is precached in a texture,

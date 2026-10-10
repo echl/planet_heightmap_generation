@@ -9,6 +9,7 @@ import { KOPPEN_CLASSES } from './koppen.js';
 import { getHydrology } from './hydrology.js';
 import { buildGlobeRivers, buildMapRivers, refreshRiverLines } from './river-lines.js';
 import { applySnowShader, refreshSnow } from './snow.js';
+import { reliefDisp } from './relief.js';
 
 // Clipping planes for map wrap — keep everything within x ∈ [-2, 2]
 renderer.localClippingEnabled = true;
@@ -746,7 +747,6 @@ export function updateSuperPlateBorders() {
     const spArr = debugLayers.superPlates;
     const { numSides } = mesh;
     const PI = Math.PI;
-    const V = 0.04;
 
     // Globe borders
     if (!state.mapMode) {
@@ -759,8 +759,8 @@ export function updateSuperPlateBorders() {
                 if (spArr[r1] !== spArr[r2]) {
                     const it = mesh.s_inner_t(s), ot = mesh.s_outer_t(s);
                     const ite = t_elevation[it], ote = t_elevation[ot];
-                    const d1 = 1.002 + (ite > 0 ? ite*V : ite*V*0.3);
-                    const d2 = 1.002 + (ote > 0 ? ote*V : ote*V*0.3);
+                    const d1 = reliefDisp(ite, 0.002);
+                    const d2 = reliefDisp(ote, 0.002);
                     bp.push(
                         t_xyz[3*it]*d1, t_xyz[3*it+1]*d1, t_xyz[3*it+2]*d1,
                         t_xyz[3*ot]*d2, t_xyz[3*ot+1]*d2, t_xyz[3*ot+2]*d2
@@ -865,7 +865,6 @@ export function buildMesh() {
     if (state.wireMesh)   { scene.remove(state.wireMesh);   state.wireMesh.geometry.dispose();   state.wireMesh.material.dispose(); }
 
     const { numSides } = mesh;
-    const V = 0.04;
     const pos = new Float32Array(numSides * 9);
     const col = new Float32Array(numSides * 9);
     const isSmooth = isHeightmap || isLandHeightmap;
@@ -886,9 +885,9 @@ export function buildMesh() {
         const ite = t_elevation[it]  - waterLevel;
         const ote = t_elevation[ot]  - waterLevel;
 
-        const rDisp  = 1.0 + (re  > 0 ? re  * V : re  * V * 0.3);
-        const itDisp = 1.0 + (ite > 0 ? ite * V : ite * V * 0.3);
-        const otDisp = 1.0 + (ote > 0 ? ote * V : ote * V * 0.3);
+        const rDisp  = reliefDisp(re);
+        const itDisp = reliefDisp(ite);
+        const otDisp = reliefDisp(ote);
 
         const off = s * 9;
         let v0x = t_xyz[3*it]   * itDisp,
@@ -1014,8 +1013,8 @@ export function buildMesh() {
             if (s < mesh.halfedges[s]) {
                 const it = mesh.s_inner_t(s), ot = mesh.s_outer_t(s);
                 const ite = t_elevation[it], ote = t_elevation[ot];
-                const d1 = 1.001 + (ite > 0 ? ite*V : ite*V*0.3);
-                const d2 = 1.001 + (ote > 0 ? ote*V : ote*V*0.3);
+                const d1 = reliefDisp(ite, 0.001);
+                const d2 = reliefDisp(ote, 0.001);
                 lp.push(
                     t_xyz[3*it]*d1, t_xyz[3*it+1]*d1, t_xyz[3*it+2]*d1,
                     t_xyz[3*ot]*d2, t_xyz[3*ot+1]*d2, t_xyz[3*ot+2]*d2
