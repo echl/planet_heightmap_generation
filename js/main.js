@@ -694,6 +694,7 @@ function applyRealistic() {
 applyRealisticOcean(waterMesh.material);
 waterMesh.renderOrder = -2;
 chkReal.addEventListener('change', applyRealistic);
+document.getElementById('chkAurora').addEventListener('change', (e) => { state.showAurora = e.target.checked; });
 sSunLon.addEventListener('input', () => {
     setSunLongitude(+sSunLon.value);
     document.getElementById('vSunLon').textContent = sSunLon.value + '°';

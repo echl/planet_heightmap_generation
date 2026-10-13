@@ -36,5 +36,6 @@ export const state = {
     showStreams: false,
     showSnow: true,
     realisticRelief: false,
+    showAurora: true,
     seasonMonth: 6,
 };

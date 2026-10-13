@@ -515,9 +515,10 @@ export function tickRealistic() {
         realUniforms.lightOn.value = rotOn ? 1 : 0;
         realUniforms.lightTime.value = _lightClock;
         // aurora: visible only while the planet spins; its clock runs on the same spin-driven time
-        const am = ensureAuroraMesh();
-        am.visible = rotOn;
-        if (rotOn) {
+        const auroraOn = rotOn && state.showAurora !== false;
+        const am = auroraOn ? ensureAuroraMesh() : auroraMesh;
+        if (am) am.visible = auroraOn;
+        if (auroraOn) {
             auroraU.auroraT.value = _lightClock;
             _qObj.copy(scene.quaternion).invert();
             auroraU.camObj.value.copy(camera.position).applyQuaternion(_qObj);
