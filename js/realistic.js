@@ -25,7 +25,10 @@ export const realUniforms = {
     cloudDrift: { value: 0 },
     cloudEvo: { value: 0 },
     cloudWindTex: { value: dummyWind },   // RGBA8: summer E,N then winter E,N wind (speed-scaled unit vectors, 0.5 = calm)
-    cloudWindOn: { value: 0 },          // time offset that makes the cloud shapes evolve (octaves slide at different speeds)
+    cloudWindOn: { value: 0 },
+    lightTex: { value: dummyTex },        // RG8: thunderstorm likelihood, summer and winter
+    lightTime: { value: 0 },              // storm clock in seconds, advanced only by the planet's spin
+    lightOn: { value: 0 },          // time offset that makes the cloud shapes evolve (octaves slide at different speeds)
 };
 
 const NOISE_GLSL = `
@@ -221,6 +224,7 @@ if (realFx > 0.5) {
 
 // ── Clouds ───────────────────────────────────────────────────────────────────────────────
 const _qObj = new THREE.Quaternion(), _qSpin = new THREE.Quaternion(), _yAxis = new THREE.Vector3(0, 1, 0);
+let _prevSpin = 0, _lightClock = 0;
 let cloudMesh = null, _cloudKey = null, _cloudDriftAcc = 0, _cloudEvoAcc = 0;
 
 // Separable box blur of the RGBA8 wind texture (wraps in longitude). Cell-to-cell wind noise would otherwise displace the
@@ -249,6 +253,16 @@ function blurWind(data, W, H, radius, passes) {
     for (let i = 0; i < cur.length; i++) data[i] = Math.round(cur[i]);
 }
 
+// Likelihood (0..1) of thunderstorms, from the model's climate: lightning needs deep convection, i.e. plenty of rain
+// (precipitation, 0..1) and warm, moist air (surface temperature in C), and it is roughly ten times commoner over land than over
+// the sea, where the air is slower to heat. It is therefore strongest over warm, wet continents (the tropics and summer
+// monsoons) and nearly absent in polar, cold or dry regions and over the open ocean.
+function lightningLikelihood(precip, tempC, land) {
+    const warm = Math.min(1, Math.max(0, (tempC - 4) / 22));
+    const wet = Math.pow(Math.min(1, Math.max(0, precip)), 1.3);
+    return Math.min(1, wet * warm * (land ? 1 : 0.12) * 1.4);
+}
+
 function buildCloudTexture(cd) {
     const W = 720, H = 360, mesh = cd.mesh, N = mesh.numRegions, xyz = cd.r_xyz;
     const ps = cd.r_precip_summer, pw = cd.r_precip_winter;
@@ -273,6 +287,8 @@ function buildCloudTexture(cd) {
         wRef[k] = sp[Math.floor(0.95 * (N - 1))] || 1;
     }
     const wdata = new Uint8Array(W * H * 4).fill(128);
+    const ldata = new Uint8Array(W * H * 2);
+    const tS = cd.r_temperature_summer, tW = cd.r_temperature_winter, elev = cd.r_elevation;
     for (let j = 0; j < H; j++) {
         const lat = ((j + 0.5) / H - 0.5) * Math.PI, cl = Math.cos(lat), sl = Math.sin(lat);
         const by = Math.min(BH - 1, Math.floor(((j + 0.5) / H) * BH));
@@ -297,6 +313,11 @@ function buildCloudTexture(cd) {
             if (best >= 0) {
                 data[o] = Math.max(0, Math.min(255, Math.round(255 * ps[best])));
                 data[o + 1] = Math.max(0, Math.min(255, Math.round(255 * pw[best])));
+                if (tS && tW) {
+                    const land = elev[best] > 0;
+                    ldata[o] = Math.round(255 * lightningLikelihood(ps[best], -45 + 90 * tS[best], land));
+                    ldata[o + 1] = Math.round(255 * lightningLikelihood(pw[best], -45 + 90 * tW[best], land));
+                }
                 if (haveWind) {
                     for (let k = 0; k < 2; k++) {
                         const e = wE[2 * k][best], n = wE[2 * k + 1][best], m = Math.hypot(e, n) || 1, sp = Math.min(1, m / wRef[k]);
@@ -316,7 +337,11 @@ function buildCloudTexture(cd) {
     wtex.wrapS = THREE.RepeatWrapping; wtex.wrapT = THREE.ClampToEdgeWrapping;
     wtex.minFilter = wtex.magFilter = THREE.LinearFilter; wtex.generateMipmaps = false;
     wtex.needsUpdate = true;
-    return { tex, wtex, haveWind };
+    const ltex = new THREE.DataTexture(ldata, W, H, THREE.RGFormat, THREE.UnsignedByteType);
+    ltex.wrapS = THREE.RepeatWrapping; ltex.wrapT = THREE.ClampToEdgeWrapping;
+    ltex.minFilter = ltex.magFilter = THREE.LinearFilter; ltex.generateMipmaps = false;
+    ltex.needsUpdate = true;
+    return { tex, wtex, ltex, haveWind };
 }
 
 function ensureCloudMesh() {
@@ -328,6 +353,7 @@ function ensureCloudMesh() {
 void main() { vOP = position; vWN = normalize(mat3(modelMatrix) * position);
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
         fragmentShader: `varying vec3 vOP; varying vec3 vWN; uniform vec3 sunDir; uniform float dayOnly;
+uniform sampler2D lightTex; uniform float lightTime; uniform float lightOn;
 ${NOISE_GLSL}${CLOUD_GLSL}
 void main() {
     float d = cloudDensity(normalize(vOP));
@@ -338,7 +364,31 @@ void main() {
     vec3 col = vec3(0.96, 0.97, 1.0) * lit;
     col = mix(col, col * vec3(1.0, 0.72, 0.52), twi * 0.5);
     col += vec3(0.004, 0.006, 0.010);
-    gl_FragColor = vec4(col, d * 0.88);
+    float alpha = d * 0.88;
+    // Lightning: on the night side, storm cells flash inside the cloud, in proportion to the climate's thunderstorm likelihood.
+    // Each ~230 km cell of a 3-D grid is a storm if its hash falls under the likelihood, and then flashes with its own period (the clock is driven by the planet's spin: see tickRealistic).
+    float nightF = 1.0 - smoothstep(-0.02, 0.10, ndl);
+    if (lightOn > 0.5 && nightF > 0.0 && d > 0.3) {
+        vec3 pd = normalize(vOP);
+        vec2 luv = vec2(atan(pd.z, pd.x) * 0.15915494 + 0.5, asin(clamp(pd.y, -1.0, 1.0)) * 0.31830989 + 0.5);
+        vec2 lt = texture2D(lightTex, luv).rg;
+        float L = mix(lt.g, lt.r, cloudSeason);
+        if (L > 0.01) {
+            vec3 P = pd * 28.0;
+            ivec3 g = ivec3(floor(P));
+            vec3 f = fract(P) - 0.5;
+            if (h3(g + ivec3(11, 5, 23)) < L * 0.15) {
+                float period = 12.0 + 58.0 * h3(g + ivec3(3, 29, 7));
+                float s = fract(lightTime / period + h3(g + ivec3(41, 13, 2))) * period;     // seconds since the last flash
+                float fl = exp(-s * 6.0) * smoothstep(0.0, 0.03, s) * (0.6 + 0.4 * abs(sin(s * 38.0)));
+                float fall = 1.0 - smoothstep(0.1, 0.5, length(f));
+                float I = fl * fall * nightF * smoothstep(0.3, 0.6, d) * 4.0;
+                col += mix(vec3(0.36, 0.55, 1.0), vec3(1.0, 0.98, 1.0), smoothstep(0.5, 1.6, I)) * min(I, 1.3);   // blue glow, white-hot centre
+                alpha = max(alpha, clamp(I, 0.0, 1.0) * 0.9);
+            }
+        }
+    }
+    gl_FragColor = vec4(col, alpha);
     #include <colorspace_fragment>
 }`,
     });
@@ -361,6 +411,8 @@ export function tickRealistic() {
         if (t) {
             if (realUniforms.cloudTex.value !== dummyTex) realUniforms.cloudTex.value.dispose();
             if (realUniforms.cloudWindTex.value !== dummyWind) realUniforms.cloudWindTex.value.dispose();
+            if (realUniforms.lightTex.value !== dummyTex) realUniforms.lightTex.value.dispose();
+            realUniforms.lightTex.value = t.ltex;
             realUniforms.cloudTex.value = t.tex; realUniforms.cloudWindTex.value = t.wtex; realUniforms.cloudWindOn.value = t.haveWind ? 1 : 0;
         }
         _cloudKey = cd.r_precip_summer;
@@ -371,11 +423,22 @@ export function tickRealistic() {
     cm.rotation.y = th;
     const m = state.seasonMonth == null ? 6 : state.seasonMonth;
     realUniforms.cloudSeason.value = 0.5 * (1 + Math.cos(2 * Math.PI * (m - HYDROLOGY.summerMonth) / 12));
-    // Prevailing winds carry the cloud pattern (the wind clock runs fast while Auto Rotate is on, slowly otherwise).
+    // Prevailing winds carry the cloud pattern (the wind clock runs only while Auto Rotate is on, so the clouds hold still when the planet does).
     const rot = document.getElementById('chkRotate');
     if (rot && rot.checked) { _cloudDriftAcc += 0.003; _cloudEvoAcc += 0.0035; }
-    realUniforms.cloudEvo.value = _cloudEvoAcc + performance.now() * 1e-3 * 0.01;
-    realUniforms.cloudDrift.value = _cloudDriftAcc + performance.now() * 1e-3 * 0.02;
+    // Lightning only happens while the planet spins (Auto Rotate), at a rate set by the spin speed. The storm clock advances
+    // one second per second at the default spin (0.0008 rad per frame at 60 frames/s), faster if the planet spins faster, so
+    // each storm cell flashes at real-time intervals of 12-70 s (a single storm complex), and nothing flashes when the planet is still.
+    {
+        const rotOn = !!(document.getElementById('chkRotate') && document.getElementById('chkRotate').checked);
+        const dth = th - _prevSpin;
+        _prevSpin = th;
+        if (rotOn && dth > 0 && dth < 0.05) _lightClock += dth / 0.0008 / 60;
+        realUniforms.lightOn.value = rotOn ? 1 : 0;
+        realUniforms.lightTime.value = _lightClock;
+    }
+    realUniforms.cloudEvo.value = _cloudEvoAcc;
+    realUniforms.cloudDrift.value = _cloudDriftAcc;
     // the sun in the planet's own frame: undo the planet's spin and the scene's seasonal tilt
     _qObj.copy(scene.quaternion).multiply(_qSpin.setFromAxisAngle(_yAxis, th)).invert();
     realUniforms.sunObj.value.copy(sunUniforms.sunDir.value).applyQuaternion(_qObj).normalize();
