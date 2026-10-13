@@ -90,6 +90,24 @@ function blendCornerColors(col, mesh, sideSwapped, r_elevation, waterLevel) {
     }
 }
 
+// Realistic mode: every vertex also carries the three corner colours of its own triangle, so the
+// fragment shader can warp the barycentric weights with noise and break the straight cell edges
+// (see realistic.js). 8-bit, since the colours only feed a small noise-driven shift.
+function setTriColors(geo, col, on) {
+    const names = ['triA', 'triB', 'triC'];
+    if (!on) { for (const n of names) if (geo.getAttribute(n)) geo.deleteAttribute(n); return; }
+    const arrs = names.map(() => new Uint8Array(col.length));
+    const q = (v) => Math.max(0, Math.min(255, Math.round(v * 255)));
+    for (let o = 0; o < col.length; o += 9) {
+        for (let k = 0; k < 3; k++) {
+            const r = q(col[o + 3 * k]), g = q(col[o + 3 * k + 1]), b = q(col[o + 3 * k + 2]);
+            const a = arrs[k];
+            for (let v = 0; v < 3; v++) { a[o + 3 * v] = r; a[o + 3 * v + 1] = g; a[o + 3 * v + 2] = b; }
+        }
+    }
+    names.forEach((n, i) => geo.setAttribute(n, new THREE.BufferAttribute(arrs[i], 3, true)));
+}
+
 // Grayscale heightmap: black (lowest) → white (highest), in physical height space
 // Absolute-scale heightmap: fixed range -5 km (deep ocean) → 6 km (tallest peak)
 // so the same physical height always maps to the same shade regardless of planet.
@@ -1048,6 +1066,7 @@ export function buildMesh() {
     geo.setAttribute('color',    new THREE.BufferAttribute(col, 3));
     geo.setAttribute('regionId', new THREE.BufferAttribute(regionIds, 1));
     geo.setAttribute('shadeNormal', new THREE.BufferAttribute(shadeN, 3));
+    setTriColors(geo, col, !!(isBiome && biomeSmoothed && state.realisticRelief));
 
     state._hoverBackup = null;
     state._koppenHoverBackup = null;
@@ -1253,6 +1272,7 @@ export function updateMeshColors() {
     }
     if (isBiome && biomeSmoothed && sideSwapped && state.realisticRelief) blendCornerColors(colors, mesh, sideSwapped, r_elevation, 0);
     colorAttr.needsUpdate = true;
+    setTriColors(state.planetMesh.geometry, colors, !!(isBiome && biomeSmoothed && sideSwapped && state.realisticRelief));
     state._hoverBackup = null;
     state._koppenHoverBackup = null;
     state._pendingBackup = null;

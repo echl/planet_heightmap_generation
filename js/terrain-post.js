@@ -400,7 +400,7 @@ export function erodeComposite(mesh, r_elevation, r_xyz, r_isOcean,
     hIters, K, m, dt,
     tIters, talusSlope, kThermal,
     gIters, glacialStrength,
-    neighborDist)
+    neighborDist, iceIdxOverride)
 {
     gIters = gIters || 0;
     glacialStrength = glacialStrength || 0;
@@ -444,10 +444,14 @@ export function erodeComposite(mesh, r_elevation, r_xyz, r_isOcean,
         }
 
         glacIdx = new Float32Array(N);
+        if (iceIdxOverride) {
+            // Ice field supplied by glaciation.js (thickness-weighted); the latitude/elevation rule below is bypassed.
+            for (let r = 0; r < N; r++) glacIdx[r] = r_isOcean[r] ? 0 : iceIdxOverride[r];
+        }
         // At strength=1 glaciation starts at ~50° latitude; at 0.5 it starts at ~70°
         const thresholdLat = Math.PI / 2 - glacialStrength * Math.PI / GLACIAL_LAT_DIVISOR;
 
-        for (let r = 0; r < N; r++) {
+        for (let r = 0; r < N && !iceIdxOverride; r++) {
             if (r_isOcean[r]) continue;
             const y = r_xyz[3 * r + 1];
             const polarDist = Math.abs(Math.asin(Math.max(-1, Math.min(1, y))));

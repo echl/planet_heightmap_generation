@@ -5,6 +5,7 @@ import { makeRng } from './rng.js';
 import { SimplexNoise } from './simplex-noise.js';
 import { setDelaunator, buildSphere, generateTriangleCenters, SphereMesh, computeNeighborDist } from './sphere-mesh.js';
 import { generateCoarsePlates, projectCoarsePlates } from './coarse-plates.js';
+import { applyContinentMotion } from './supercontinent.js';
 import { smoothAndReconnectPlates } from './plates.js';
 import { assignElevation } from './elevation.js';
 import { buildSuperPlates } from './super-plates.js';
@@ -15,6 +16,7 @@ import { computePrecipitation } from './precipitation.js';
 import { computeTemperature } from './temperature.js';
 import { classifyKoppen } from './koppen.js';
 import { computeTerrainMetrics } from './terrain-metrics.js';
+import { computeIce, erosionIceIndex, applyGlacialDeposits, applyIsostasyAndSeaLevel, glacialPhaseParams } from './glaciation.js';
 import { applyPlatePhysics, expandPlatePhysicsDebug } from './plate-physics.js';
 import { SUPER_PLATE_PHYSICS_MULT, DETAIL_NOISE_DAMPEN_STRENGTH } from './terrain-config.js';
 import Delaunator from 'https://cdn.jsdelivr.net/npm/delaunator@5.0.1/+esm';
@@ -72,6 +74,7 @@ function computeOrogenicField(debugLayers) {
 // Run terrain post-processing with per-step timing
 function runPostProcessing(mesh, r_xyz, r_elevation, params, neighborDist, seed, r_hotspot, r_dampen, r_orogenic) {
     const { smoothing, glacialErosion, hydraulicErosion, thermalErosion, ridgeSharpening, terrainWarp } = params;
+    const gp = glacialPhaseParams(params.glacialPhase);
     const timing = [];
 
     // Terrain warp — first step, before ocean detection or smoothing
@@ -122,6 +125,14 @@ function runPostProcessing(mesh, r_xyz, r_elevation, params, neighborDist, seed,
         timing.push({ stage: 'Detail noise L2 (±50m biased)', ms: performance.now() - t0 });
     }
 
+    // Ice field at the maximum extent: drives glacial carving and the deposits below.
+    let iceMax = null;
+    if (glacialErosion > 0) {
+        const t0 = performance.now();
+        iceMax = computeIce(mesh, r_xyz, r_elevation, r_isOcean, glacialErosion);
+        timing.push({ stage: 'Ice field (maximum extent)', ms: performance.now() - t0 });
+    }
+
     if (glacialErosion > 0 || hydraulicErosion > 0 || thermalErosion > 0) {
         const gIters = Math.round(glacialErosion * 10);
         const hIters = Math.round(hydraulicErosion * 20);
@@ -134,8 +145,15 @@ function runPostProcessing(mesh, r_xyz, r_elevation, params, neighborDist, seed,
             hIters, hK, 0.5, 1.0,
             tIters, talusSlope, kThermal,
             gIters, glacialErosion,
-            neighborDist);
+            neighborDist, iceMax ? erosionIceIndex(iceMax) : undefined);
         timing.push({ stage: `Erosion composite (h=${hIters}, t=${tIters}, g=${gIters})`, ms: performance.now() - t0 });
+    }
+
+    let deposits = null;
+    if (iceMax) {
+        const t0 = performance.now();
+        deposits = applyGlacialDeposits(mesh, r_xyz, r_elevation, r_isOcean, iceMax);
+        timing.push({ stage: 'Glacial deposits (moraine, till, outwash, loess)', ms: performance.now() - t0 });
     }
 
     if (ridgeSharpening > 0) {
@@ -157,15 +175,34 @@ function runPostProcessing(mesh, r_xyz, r_elevation, params, neighborDist, seed,
         dl_erosionDelta[r] = r_elevation[r] - preErosion[r];
     }
 
-    return { dl_erosionDelta, postTiming: timing };
+    // Glacial phase: ice present now, isostatic depression, sea level (all after the terrain is final).
+    const N = mesh.numRegions;
+    let iceNow = null;
+    if (glacialErosion > 0) iceNow = computeIce(mesh, r_xyz, r_elevation, r_isOcean, glacialErosion * gp.extentScale);
+    {
+        const t0 = performance.now();
+        var depression = applyIsostasyAndSeaLevel(mesh, r_elevation, iceMax ? iceMax.thicknessKm : new Float32Array(N), iceNow ? iceNow.isIce : null, gp);
+        timing.push({ stage: `Isostasy + sea level (phase=${gp.phase.toFixed(2)}, sea -${(gp.seaDropKm * 1000).toFixed(0)} m)`, ms: performance.now() - t0 });
+    }
+    const glacial = {
+        layers: {
+            iceThickness: iceNow ? iceNow.thicknessKm : new Float32Array(N),
+            isostasy: depression,
+            glacialDeposits: deposits ? deposits.glacialDeposits : new Float32Array(N),
+            loess: deposits ? deposits.loess : new Float32Array(N),
+        },
+    };
+    return { dl_erosionDelta, postTiming: timing, glacial };
 }
 
 function getClimateParams(data) {
     const temperatureOffset = data?.temperatureOffset ?? W?.temperatureOffset ?? 0;
     const precipitationOffset = data?.precipitationOffset ?? W?.precipitationOffset ?? 0;
     const landCoverage = data?.landCoverage ?? W?.landCoverage ?? 0.3;
-    if (W) { W.temperatureOffset = temperatureOffset; W.precipitationOffset = precipitationOffset; W.landCoverage = landCoverage; }
-    return { temperatureOffset, precipitationOffset, landCoverage };
+    const glacialPhase = data?.glacialPhase ?? W?.glacialPhase ?? 0;
+    if (W) { W.temperatureOffset = temperatureOffset; W.precipitationOffset = precipitationOffset; W.landCoverage = landCoverage; W.glacialPhase = glacialPhase; }
+    // The glacial phase cools the whole planet (about -6 C at the glacial maximum).
+    return { temperatureOffset: temperatureOffset + glacialPhaseParams(glacialPhase).deltaTC, precipitationOffset, landCoverage };
 }
 
 function buildClimateFields(windResult, oceanResult, precipResult, tempResult) {
@@ -193,7 +230,7 @@ function buildClimateFields(windResult, oceanResult, precipResult, tempResult) {
 }
 
 function handleGenerate(data) {
-    const { N, P, jitter, nMag, numContinents, smoothing, hydraulicErosion, thermalErosion, ridgeSharpening, glacialErosion, terrainWarp, continentSizeVariety = 0, temperatureOffset = 0, precipitationOffset = 0, landCoverage = 0.3, seed: overrideSeed, toggledIndices, skipClimate } = data;
+    const { N, P, jitter, nMag, numContinents, smoothing, hydraulicErosion, thermalErosion, ridgeSharpening, glacialErosion, terrainWarp, continentSizeVariety = 0, continentAssembly = 0, temperatureOffset = 0, precipitationOffset = 0, landCoverage = 0.3, seed: overrideSeed, toggledIndices, skipClimate, glacialPhase = 0 } = data;
     const spread = 5;
     const timing = []; // top-level pipeline timing
 
@@ -218,8 +255,9 @@ function handleGenerate(data) {
 
         progress(10, 'Generating coarse plates\u2026');
         t0 = performance.now();
-        const { coarseMesh, coarse_xyz, coarse_r_plate, coarsePlateSeeds, coarsePlateVec, coarsePlateIsOcean } =
-            generateCoarsePlates(seed, P, numContinents, continentSizeVariety, landCoverage);
+        const { coarseMesh, coarse_xyz, coarse_r_plate, coarsePlateSeeds, coarsePlateVec, coarsePlateIsOcean, continentMotion, assemblyInfo } =
+            generateCoarsePlates(seed, P, numContinents, continentSizeVariety, landCoverage, continentAssembly);
+        if (assemblyInfo) console.log('[assembly]', JSON.stringify(assemblyInfo));
         timing.push({ stage: `Coarse plates (${P} plates, ${numContinents} continents)`, ms: performance.now() - t0 });
 
         progress(20, 'Projecting plates\u2026');
@@ -267,6 +305,7 @@ function handleGenerate(data) {
             plateVec, plateSeeds, plateIsOcean,
             coarse_r_plate, coarseMesh, coarse_xyz, seed
         );
+        applyContinentMotion(plateVec, continentMotion);     // supercontinent drift (no-op when Assembly is 0)
         timing.push({ stage: 'Plate physics (drag + slab pull + ridge push + mantle flow)', ms: performance.now() - t0 });
 
         // Build super plates for broad orogenic belts (skip if too few plates)
@@ -315,9 +354,10 @@ function handleGenerate(data) {
 
         progress(60, 'Eroding terrain\u2026');
         t0 = performance.now();
-        const { dl_erosionDelta, postTiming } = runPostProcessing(mesh, r_xyz, r_elevation, { smoothing, glacialErosion, hydraulicErosion, thermalErosion, ridgeSharpening, terrainWarp }, neighborDist, seed, debugLayers.hotspot, r_dampen, r_orogenic);
+        const { dl_erosionDelta, postTiming, glacial } = runPostProcessing(mesh, r_xyz, r_elevation, { smoothing, glacialErosion, hydraulicErosion, thermalErosion, ridgeSharpening, terrainWarp, glacialPhase }, neighborDist, seed, debugLayers.hotspot, r_dampen, r_orogenic);
         timing.push({ stage: 'Terrain post-processing (total)', ms: performance.now() - t0 });
         debugLayers.erosionDelta = dl_erosionDelta;
+        Object.assign(debugLayers, glacial.layers);
 
         // Expand plate physics diagnostics to hi-res mesh
         {
@@ -364,7 +404,7 @@ function handleGenerate(data) {
 
             progress(86, 'Computing temperature\u2026');
             t0 = performance.now();
-            tempResult = computeTemperature(mesh, r_xyz, r_elevation, windResult, oceanResult, precipResult, temperatureOffset);
+            tempResult = computeTemperature(mesh, r_xyz, r_elevation, windResult, oceanResult, precipResult, temperatureOffset + glacialPhaseParams(glacialPhase).deltaTC);
             timing.push({ stage: 'Temperature', ms: performance.now() - t0 });
             if (tempResult._tempTiming) timing.push(...tempResult._tempTiming);
             debugLayers.tempSummer = tempResult.r_temperature_summer;
@@ -396,7 +436,7 @@ function handleGenerate(data) {
             seed, nMag, noise, P,
             mountain_r: new Set(mountain_r), coastline_r: new Set(coastline_r), ocean_r: new Set(ocean_r),
             r_stress: new Float32Array(r_stress),
-            temperatureOffset, precipitationOffset, landCoverage,
+            temperatureOffset, precipitationOffset, landCoverage, glacialPhase,
             cachedWind: windResult, cachedOcean: oceanResult,
             // Retain detail-noise dampen + orogenic fields so reapply (which
             // reuses prePostElev) shapes the noise the same way as the initial
@@ -456,7 +496,7 @@ function handleGenerate(data) {
             _pipelineTiming: timing,          // top-level pipeline stages
             _postTiming: postTiming,          // post-processing sub-stages
             _workerTotal: tWorkerTotal,
-            _params: { N, P, jitter, nMag, numContinents, smoothing, terrainWarp, hydraulicErosion, thermalErosion, ridgeSharpening, glacialErosion, continentSizeVariety, temperatureOffset, precipitationOffset, landCoverage, seed },
+            _params: { N, P, jitter, nMag, numContinents, smoothing, terrainWarp, hydraulicErosion, thermalErosion, ridgeSharpening, glacialErosion, continentSizeVariety, continentAssembly, temperatureOffset, precipitationOffset, landCoverage, seed },
             terrainMetrics
         };
 
@@ -491,7 +531,7 @@ function handleReapply(data) {
 
         progress(20, 'Eroding terrain\u2026');
         t0 = performance.now();
-        const { dl_erosionDelta, postTiming } = runPostProcessing(W.mesh, W.r_xyz, r_elevation, data, W.neighborDist, W.seed, undefined, W.r_dampen, W.r_orogenic);
+        const { dl_erosionDelta, postTiming, glacial } = runPostProcessing(W.mesh, W.r_xyz, r_elevation, data, W.neighborDist, W.seed, undefined, W.r_dampen, W.r_orogenic);
         const tPost = performance.now() - t0;
 
         // Update retained final elevation for deferred climate
@@ -541,6 +581,7 @@ function handleReapply(data) {
             r_elevation,
             t_elevation,
             erosionDelta: dl_erosionDelta,
+            glacialLayers: glacial.layers,
             ...buildClimateFields(windResult, oceanResult, precipResult, tempResult),
             windDebugLayers: windResult ? {
                 pressureSummer: windResult.r_pressure_summer,
@@ -614,9 +655,10 @@ function handleEditRecompute(data) {
 
         progress(50, 'Eroding terrain\u2026');
         t0 = performance.now();
-        const { dl_erosionDelta, postTiming } = runPostProcessing(mesh, r_xyz, r_elevation, data, W.neighborDist, W.seed, debugLayers.hotspot, r_dampen, r_orogenic);
+        const { dl_erosionDelta, postTiming, glacial } = runPostProcessing(mesh, r_xyz, r_elevation, data, W.neighborDist, W.seed, debugLayers.hotspot, r_dampen, r_orogenic);
         const tPost = performance.now() - t0;
         debugLayers.erosionDelta = dl_erosionDelta;
+        Object.assign(debugLayers, glacial.layers);
 
         // Update retained final elevation for deferred climate
         W.r_elevation_final = new Float32Array(r_elevation);
@@ -942,7 +984,7 @@ function handleImportHeightmap(data) {
 
         progress(35, 'Processing terrain\u2026');
         t0 = performance.now();
-        const { dl_erosionDelta, postTiming } = runPostProcessing(mesh, r_xyz, r_elevation, { smoothing, glacialErosion, hydraulicErosion, thermalErosion, ridgeSharpening, terrainWarp }, neighborDist, seed);
+        const { dl_erosionDelta, postTiming, glacial } = runPostProcessing(mesh, r_xyz, r_elevation, { smoothing, glacialErosion, hydraulicErosion, thermalErosion, ridgeSharpening, terrainWarp }, neighborDist, seed);
         timing.push({ stage: 'Terrain post-processing', ms: performance.now() - t0 });
 
         progress(50, 'Deriving plates\u2026');
@@ -973,7 +1015,7 @@ function handleImportHeightmap(data) {
         }
 
         const r_stress = new Float32Array(mesh.numRegions); // no stress for imports
-        const debugLayers = { erosionDelta: dl_erosionDelta };
+        const debugLayers = { erosionDelta: dl_erosionDelta, ...glacial.layers };
         const nMag = 0;
 
         let windResult = null, oceanResult = null, precipResult = null, tempResult = null;

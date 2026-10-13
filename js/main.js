@@ -17,8 +17,8 @@ import { KOPPEN_CLASSES } from './koppen.js';
 import { elevationToColor } from './color-map.js';
 
 // Slider value displays + stale tracking
-const sliderIds = ['sN','sP','sCn','sJ','sNs','sCsv','sLc'];
-const PLATE_SLIDERS = ['sP', 'sCn', 'sCsv', 'sLc'];
+const sliderIds = ['sN','sP','sCn','sJ','sNs','sCsv','sSa','sLc'];
+const PLATE_SLIDERS = ['sP', 'sCn', 'sCsv', 'sSa', 'sLc'];
 let lastGenValues = {};
 
 function snapshotSliders() {
@@ -136,7 +136,7 @@ function initSliderTooltip(slider) {
     slider.addEventListener('pointercancel', hide);
 }
 
-for (const [s,v] of [['sN','vN'],['sP','vP'],['sCn','vCn'],['sJ','vJ'],['sNs','vNs'],['sCsv','vCsv'],['sLc','vLc'],['sTw','vTw'],['sS','vS'],['sGl','vGl'],['sHEr','vHEr'],['sTEr','vTEr'],['sRs','vRs'],['sTmp','vTmp'],['sPrc','vPrc']]) {
+for (const [s,v] of [['sN','vN'],['sP','vP'],['sCn','vCn'],['sJ','vJ'],['sNs','vNs'],['sCsv','vCsv'],['sSa','vSa'],['sLc','vLc'],['sTw','vTw'],['sS','vS'],['sGl','vGl'],['sGlP','vGlP'],['sHEr','vHEr'],['sTEr','vTEr'],['sRs','vRs'],['sTmp','vTmp'],['sPrc','vPrc']]) {
     const slider = document.getElementById(s);
     initSliderTooltip(slider);
     slider.addEventListener('input', e => {
@@ -156,7 +156,7 @@ for (const [s,v] of [['sN','vN'],['sP','vP'],['sCn','vCn'],['sJ','vJ'],['sNs','v
         } else {
             document.getElementById(v).textContent = e.target.value;
         }
-        if (s === 'sTw' || s === 'sS' || s === 'sGl' || s === 'sHEr' || s === 'sTEr' || s === 'sRs') {
+        if (s === 'sTw' || s === 'sS' || s === 'sGl' || s === 'sGlP' || s === 'sHEr' || s === 'sTEr' || s === 'sRs') {
             markReapplyPending();
         } else if (s === 'sTmp' || s === 'sPrc') {
             // Display-only update during drag; actual recompute on change (release)
@@ -544,7 +544,8 @@ function updatePlanetCode(flash) {
         +document.getElementById('sTmp').value,
         +document.getElementById('sPrc').value,
         +document.getElementById('sLc').value,
-        getToggledIndices()
+        getToggledIndices(),
+        +document.getElementById('sSa').value
     );
     currentCode = code;
     seedInput.value = code;
@@ -613,7 +614,7 @@ function paramsToSliderMap(params) {
     return {
         sN: sliderFromDetail(params.N), sJ: params.jitter, sP: params.P,
         sCn: params.numContinents, sNs: params.roughness,
-        sCsv: params.continentSizeVariety, sLc: params.landCoverage,
+        sCsv: params.continentSizeVariety, sSa: params.continentAssembly ?? 0, sLc: params.landCoverage,
         sTw: params.terrainWarp, sS: params.smoothing, sGl: params.glacialErosion,
         sHEr: params.hydraulicErosion, sTEr: params.thermalErosion,
         sRs: params.ridgeSharpening, sTmp: params.temperatureOffset,

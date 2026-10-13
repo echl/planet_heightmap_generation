@@ -181,8 +181,8 @@
                     <div class="slider-hint"><span>Few</span><span>Many</span></div>
                 </div>
                 <div class="cg">
-                    <label>Continents <span class="tip" data-tip="Target number of landmasses — 1 creates a supercontinent, higher values scatter land into multiple continents and archipelagos">?</span> <span class="v" id="vCn">4</span></label>
-                    <input type="range" id="sCn" min="1" max="10" value="4" step="1">
+                    <label>Continents <span class="tip" data-tip="Target number of landmasses — 1 creates a supercontinent, higher values scatter land into multiple continents and archipelagos">?</span> <span class="v" id="vCn">7</span></label>
+                    <input type="range" id="sCn" min="1" max="10" value="7" step="1">
                     <div class="slider-hint"><span>Supercontinent</span><span>Archipelago</span></div>
                 </div>
                 <div class="cg">
@@ -191,9 +191,14 @@
                     <div class="slider-hint"><span>Smooth</span><span>Rugged</span></div>
                 </div>
                 <div class="cg">
-                    <label>Continent Size Variety <span class="tip" data-tip="How much continent sizes vary — at 0 all continents are similar in size, at 1 you get a mix of large and small landmasses">?</span> <span class="v" id="vCsv">0.35</span></label>
-                    <input type="range" id="sCsv" min="0" max="1" value="0.35" step="0.05">
+                    <label>Continent Size Variety <span class="tip" data-tip="How much continent sizes vary — at 0 all continents are similar in size, at 1 you get a mix of large and small landmasses">?</span> <span class="v" id="vCsv">1</span></label>
+                    <input type="range" id="sCsv" min="0" max="1" value="1" step="0.05">
                     <div class="slider-hint"><span>Equal</span><span>Varied</span></div>
+                </div>
+                <div class="cg">
+                    <label>Supercontinent Assembly <span class="tip" data-tip="Plays the continents' drift forward to model the supercontinent cycle — at 0 they are dispersed, as generated; as it rises they drift together as rigid plates, collide and weld into one supercontinent. Their drift also feeds the plate-motion model, so the sutures get collision tectonics">?</span> <span class="v" id="vSa">0</span></label>
+                    <input type="range" id="sSa" min="0" max="1" value="0" step="0.05">
+                    <div class="slider-hint"><span>Dispersed</span><span>Supercontinent</span></div>
                 </div>
                 <div class="cg">
                     <label>Land Coverage <span class="tip" data-tip="Percentage of the planet covered by land — low values create ocean worlds, high values create desert worlds with reduced precipitation">?</span> <span class="v" id="vLc">30%</span></label>
@@ -226,6 +231,11 @@
                     <label>Glacial Erosion <span class="tip" data-tip="Ice-age sculpting — carves fjords, U-shaped valleys, and lake basins at high latitudes and altitudes">?</span> <span class="v" id="vGl">0.50</span></label>
                     <input type="range" id="sGl" min="0" max="1" value="0.50" step="0.05">
                     <div class="slider-hint"><span>None</span><span>Ice Age</span></div>
+                </div>
+                <div class="cg">
+                    <label>Glacial Phase <span class="tip" data-tip="Where the world sits in the ice-age cycle: 0 = today, 1 = glacial maximum. Lowers sea level up to 125 m (exposing continental shelves), cools the planet 6 C, and pushes the crust down under the ice (it rebounds slowly after). Apply with Reapply.">?</span> <span class="v" id="vGlP">0.00</span></label>
+                    <input type="range" id="sGlP" min="0" max="1" value="0" step="0.05">
+                    <div class="slider-hint"><span>Today</span><span>Glacial max</span></div>
                 </div>
                 <div class="cg">
                     <label>Hydraulic Erosion <span class="tip" data-tip="Iterative stream-power erosion — carves river valleys and dendritic drainage networks">?</span> <span class="v" id="vHEr">0.50</span></label>
@@ -276,8 +286,8 @@
                     <input type="range" id="sMapCenterLon" min="-180" max="180" value="0" step="5">
                 </div>
                 <div class="map-tabs" id="mapTabs">
-                    <button class="map-tab active" data-layer="">Terrain</button>
-                    <button class="map-tab" data-layer="biome">Satellite</button>
+                    <button class="map-tab" data-layer="">Terrain</button>
+                    <button class="map-tab active" data-layer="biome">Satellite</button>
                     <button class="map-tab" data-layer="koppen">Climate</button>
                     <button class="map-tab" data-layer="landheightmap">Heightmap</button>
                 </div>
@@ -285,7 +295,7 @@
                     <label>Inspect</label>
                     <select id="debugLayer">
                         <option value="">Terrain</option>
-                        <option value="biome">Satellite</option>
+                        <option value="biome" selected>Satellite</option>
                         <option value="koppen">K&ouml;ppen Climate</option>
                         <option value="landheightmap">Land Heightmap</option>
                         <optgroup label="Geology">
@@ -310,6 +320,12 @@
                             <option value="uniformNoise">Uniform Land Noise</option>
                             <option value="dynamicTopo">Dynamic Topography</option>
                             <option value="erosionDelta">Erosion Delta</option>
+                        </optgroup>
+                        <optgroup label="Glaciation">
+                            <option value="iceThickness">Ice Thickness</option>
+                            <option value="isostasy">Isostatic Depression</option>
+                            <option value="glacialDeposits">Glacial Deposits</option>
+                            <option value="loess">Loess</option>
                         </optgroup>
                         <optgroup label="Plate Physics">
                             <option value="continentalDrag">Continental Drag</option>
@@ -393,7 +409,7 @@
     </div>
     <select id="mobileViewSwitch" class="mobile-view-switch">
         <option value="">Terrain</option>
-        <option value="biome">Satellite</option>
+        <option value="biome" selected>Satellite</option>
         <option value="koppen">Climate</option>
         <option value="landheightmap">Heightmap</option>
     </select>
@@ -447,7 +463,7 @@
                 <label>Type</label>
                 <select id="exportType">
                     <option value="color">Color Map</option>
-                    <option value="biome">Satellite</option>
+                    <option value="biome" selected>Satellite</option>
                     <option value="koppen">Climate (K&ouml;ppen)</option>
                     <option value="heightmap">Heightmap (B&amp;W)</option>
                     <option value="landheightmap">Land Heightmap (B&amp;W)</option>

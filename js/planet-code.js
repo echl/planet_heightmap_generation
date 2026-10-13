@@ -192,9 +192,10 @@ function decodeFormat(packed, config, toggleStr) {
  * @param {number} precipitationOffset - Precipitation offset (-1–1, step 0.1)
  * @param {number} landCoverage - Land Coverage (0–1, step 0.05)
  * @param {number[]} [toggledIndices=[]] - Sorted array of toggled plate indices
+ * @param {number} [continentAssembly=0] - Supercontinent Assembly (0–1, step 0.05); appended as "~NN" (2-char base36 of the 0–20 step index) only when non-zero, so older codes are unchanged
  * @returns {string} base36 code (22 chars without edits, 22 + '-' + 2*k with k edits)
  */
-export function encodePlanetCode(seed, N, jitter, P, numContinents, roughness, terrainWarp, smoothing, glacialErosion, hydraulicErosion, thermalErosion, ridgeSharpening, soilCreep, continentSizeVariety, temperatureOffset, precipitationOffset, landCoverage, toggledIndices = []) {
+export function encodePlanetCode(seed, N, jitter, P, numContinents, roughness, terrainWarp, smoothing, glacialErosion, hydraulicErosion, thermalErosion, ridgeSharpening, soilCreep, continentSizeVariety, temperatureOffset, precipitationOffset, landCoverage, toggledIndices = [], continentAssembly = 0) {
     const nIdx  = toIndex(N, SLIDERS[0]);
     const jIdx  = toIndex(jitter, SLIDERS[1]);
     const pIdx  = toIndex(P, SLIDERS[2]);
@@ -233,6 +234,10 @@ export function encodePlanetCode(seed, N, jitter, P, numContinents, roughness, t
 
     let code = packed.toString(36).padStart(BASE_LEN, '0');
 
+    // Optional Supercontinent Assembly suffix (only when non-zero): "~" + 2-char base36 step index (0-20)
+    const saIdx = Math.max(0, Math.min(20, Math.round(continentAssembly * 20)));
+    if (saIdx > 0) code += '~' + saIdx.toString(36).padStart(2, '0');
+
     // Append toggled plate indices: "-" + 2-char base36 per index
     if (toggledIndices.length > 0) {
         code += '-' + toggledIndices
@@ -253,10 +258,21 @@ export function decodePlanetCode(code) {
     if (typeof code !== 'string') return null;
     code = code.trim().toLowerCase();
 
-    // Split base code from optional toggle suffix
+    // Split base code from the optional assembly ("~NN") and toggle ("-...") suffixes
     const dashIdx = code.indexOf('-');
-    const base = dashIdx === -1 ? code : code.slice(0, dashIdx);
+    let head = dashIdx === -1 ? code : code.slice(0, dashIdx);
     const toggleStr = dashIdx === -1 ? '' : code.slice(dashIdx + 1);
+    let assembly = 0;
+    const tildeIdx = head.indexOf('~');
+    if (tildeIdx !== -1) {
+        const cs = head.slice(tildeIdx + 1);
+        if (!/^[0-9a-z]{2}$/.test(cs)) return null;
+        const ci = parseInt(cs, 36);
+        if (isNaN(ci) || ci > 20) return null;
+        assembly = ci / 20;
+        head = head.slice(0, tildeIdx);
+    }
+    const base = head;
 
     const config = DECODE_FORMATS[base.length];
     if (!config) return null;
@@ -271,5 +287,7 @@ export function decodePlanetCode(code) {
         return null;
     }
 
-    return decodeFormat(packed, config, toggleStr);
+    const res = decodeFormat(packed, config, toggleStr);
+    if (res) res.continentAssembly = assembly;
+    return res;
 }

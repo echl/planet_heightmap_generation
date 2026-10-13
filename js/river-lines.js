@@ -187,7 +187,7 @@ function makeRibbonMesh(segs, makeMat) {
                 posB[3 * o + a] = segs.pb[3 * i + a];
             }
             corner[2 * o] = CX[v]; corner[2 * o + 1] = CY[v];
-            sid[o] = i;
+            sid[o] = segs.sid ? segs.sid[i] : i;
         }
         const b = i * 4;
         idx.set([b, b + 1, b + 2, b + 2, b + 1, b + 3], i * 6);
@@ -264,6 +264,57 @@ export function riverLinesWanted() {
     return !(plates && plates.checked) && (!dl || dl === 'biome');
 }
 
+// Realistic mode: instead of one straight segment per link, follow a Catmull-Rom spline through the
+// cell centres (so the course bends smoothly where it turns) plus a gentle, deterministic meander.
+const SPLINE_K = 6;
+function hash01(n) { let h = Math.imul(n ^ 0x9e3779b9, 0x85ebca6b); h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35); h ^= h >>> 16; return (h >>> 0) / 4294967295; }
+
+function smoothLinkSegments(curData, h, links, segs, dispFn) {
+    const { r_xyz, r_elevation } = curData;
+    const N = curData.mesh.numRegions;
+    const bestUp = new Int32Array(N).fill(-1);
+    for (const L of links) {
+        const u = bestUp[L.t];
+        if (u < 0 || h.r_flowMax[L.r] > h.r_flowMax[u]) bestUp[L.t] = L.r;
+    }
+    const cell = (r) => [r_xyz[3 * r], r_xyz[3 * r + 1], r_xyz[3 * r + 2]];
+    const mid = (a, b) => { const m = [a[0] + b[0], a[1] + b[1], a[2] + b[2]], l = Math.hypot(...m) || 1; return [m[0] / l, m[1] / l, m[2] / l]; };
+    const refl = (a, b) => [2 * a[0] - b[0], 2 * a[1] - b[1], 2 * a[2] - b[2]];
+    links.forEach((L, li) => {
+        const P1 = cell(L.r), P2 = endpointDir(curData, L);
+        const up = bestUp[L.r];
+        const P0 = up >= 0 ? cell(up) : refl(P1, P2);
+        let P3;
+        const nx = L.land ? h.r_flowTo[L.t] : -1;
+        if (nx >= 0) P3 = r_elevation[nx] > 0 ? cell(nx) : mid(cell(L.t), cell(nx)); else P3 = refl(P2, P1);
+        const dA = dispFn(r_elevation[L.r]), dB = L.land ? dispFn(r_elevation[L.t]) : dA;
+        const len = Math.hypot(P2[0] - P1[0], P2[1] - P1[1], P2[2] - P1[2]);
+        const a1 = (hash01(L.r * 2 + 1) * 2 - 1) * 0.16 * len, a2 = (hash01(L.r * 2 + 7) * 2 - 1) * 0.07 * len;
+        let prev = null;
+        for (let j = 0; j <= SPLINE_K; j++) {
+            const u = j / SPLINE_K, u2 = u * u, u3 = u2 * u;
+            const q = [0, 0, 0], tg = [0, 0, 0];
+            for (let a = 0; a < 3; a++) {
+                q[a] = 0.5 * (2 * P1[a] + (-P0[a] + P2[a]) * u + (2 * P0[a] - 5 * P1[a] + 4 * P2[a] - P3[a]) * u2 + (-P0[a] + 3 * P1[a] - 3 * P2[a] + P3[a]) * u3);
+                tg[a] = 0.5 * ((-P0[a] + P2[a]) + 2 * (2 * P0[a] - 5 * P1[a] + 4 * P2[a] - P3[a]) * u + 3 * (-P0[a] + 3 * P1[a] - 3 * P2[a] + P3[a]) * u2);
+            }
+            let ql = Math.hypot(q[0], q[1], q[2]) || 1;
+            q[0] /= ql; q[1] /= ql; q[2] /= ql;
+            // lateral meander: radial x tangent, windowed to zero at both cell centres
+            let lx = q[1] * tg[2] - q[2] * tg[1], ly = q[2] * tg[0] - q[0] * tg[2], lz = q[0] * tg[1] - q[1] * tg[0];
+            const ll = Math.hypot(lx, ly, lz) || 1;
+            const m = a1 * Math.sin(Math.PI * u) + a2 * Math.sin(2 * Math.PI * u);
+            q[0] += lx / ll * m; q[1] += ly / ll * m; q[2] += lz / ll * m;
+            ql = Math.hypot(q[0], q[1], q[2]) || 1;
+            const d = dA + (dB - dA) * u;
+            const pt = [q[0] / ql * d, q[1] / ql * d, q[2] / ql * d];
+            if (prev) { segs.pa.push(prev[0], prev[1], prev[2]); segs.pb.push(pt[0], pt[1], pt[2]); segs.sid.push(li); }
+            prev = pt;
+        }
+    });
+}
+
+
 export function buildGlobeRivers() {
     disposePart('riverGlobeMesh');
     if (!state.curData || !state.planetMesh) return;
@@ -273,15 +324,20 @@ export function buildGlobeRivers() {
     state._riverGlobeSrc = h;
     if (!links.length) return;
     const { r_xyz, r_elevation } = state.curData;
-    const segs = { pa: [], pb: [], q: new Float32Array(links.length * NM) };
-    links.forEach((L, i) => {
-        const dA = disp(r_elevation[L.r]);
-        const dB = L.land ? disp(r_elevation[L.t]) : dA;
-        const e = endpointDir(state.curData, L);
-        segs.pa.push(r_xyz[3 * L.r] * dA, r_xyz[3 * L.r + 1] * dA, r_xyz[3 * L.r + 2] * dA);
-        segs.pb.push(e[0] * dB, e[1] * dB, e[2] * dB);
-        segs.q.set(L.q, i * NM);
-    });
+    const segs = { pa: [], pb: [], q: new Float32Array(links.length * NM), sid: [] };
+    links.forEach((L, i) => segs.q.set(L.q, i * NM));
+    if (state.realisticRelief) {
+        smoothLinkSegments(state.curData, h, links, segs, disp);
+    } else {
+        segs.sid = null;
+        links.forEach((L) => {
+            const dA = disp(r_elevation[L.r]);
+            const dB = L.land ? disp(r_elevation[L.t]) : dA;
+            const e = endpointDir(state.curData, L);
+            segs.pa.push(r_xyz[3 * L.r] * dA, r_xyz[3 * L.r + 1] * dA, r_xyz[3 * L.r + 2] * dA);
+            segs.pb.push(e[0] * dB, e[1] * dB, e[2] * dB);
+        });
+    }
     const mesh = makeRibbonMesh(segs, (tex) => makeMaterial(1 / EARTH_KM, state.realisticRelief ? 0.0006 : 0.006, 0, tex, true));
     mesh.visible = riverLinesWanted();
     state.planetMesh.add(mesh);          // child of the planet, so it follows auto-rotation

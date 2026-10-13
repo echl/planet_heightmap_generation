@@ -23,7 +23,7 @@ export const state = {
     mapMode: false,
     mapCenterLon: 0,
     dragStart: null,
-    debugLayer: '',
+    debugLayer: 'biome',
     isTouchDevice: ('ontouchstart' in window) || (navigator.maxTouchPoints > 0),
     editMode: false,
     oceanCurrentArrowGroup: null,

@@ -7,6 +7,7 @@ import { buildSphere } from './sphere-mesh.js';
 import { SimplexNoise } from './simplex-noise.js';
 import { generatePlates } from './plates.js';
 import { assignOceanLand } from './ocean-land.js';
+import { assembleSupercontinent } from './supercontinent.js';
 import {
     N_COARSE, COARSE_JITTER, COARSE_PERTURB_BASE, COARSE_PERTURB_LOW_T,
     COARSE_FBM_BASE_FREQ, COARSE_FBM_OCTAVES, COARSE_FBM_DECAY, COARSE_FBM_FREQ_MULT,
@@ -18,7 +19,7 @@ import {
  * Uses isolated RNG so it doesn't affect the main mesh's random stream.
  * Jitter is fixed so plate shapes don't change when the user adjusts irregularity.
  */
-export function generateCoarsePlates(seed, numPlates, numContinents, continentSizeVariety = 0, landCoverage = 0.3) {
+export function generateCoarsePlates(seed, numPlates, numContinents, continentSizeVariety = 0, landCoverage = 0.3, continentAssembly = 0) {
     const coarseRng = makeRng(seed + 137);
     const { mesh: coarseMesh, r_xyz: coarse_xyz } = buildSphere(N_COARSE, COARSE_JITTER, coarseRng);
 
@@ -29,6 +30,19 @@ export function generateCoarsePlates(seed, numPlates, numContinents, continentSi
         coarseMesh, coarse_r_plate, coarsePlateSeeds, coarse_xyz, seed, numContinents, continentSizeVariety, landCoverage
     );
 
+    // Supercontinent cycle: drift the landmasses together (see supercontinent.js)
+    let continentMotion = null, assemblyInfo = null;
+    if (continentAssembly > 0) {
+        const res = assembleSupercontinent(coarseMesh, coarse_xyz, coarse_r_plate, coarsePlateIsOcean, continentAssembly);
+        if (res) {
+            coarse_r_plate.set(res.r_plate);
+            for (const pid of res.removedPlates) {          // plates that were overridden by a colliding continent
+                coarsePlateSeeds.delete(pid); coarsePlateIsOcean.delete(pid); delete coarsePlateVec[pid];
+            }
+            continentMotion = res.motion; assemblyInfo = res.info;
+        }
+    }
+
     return {
         coarseMesh,
         coarse_xyz,
@@ -36,6 +50,8 @@ export function generateCoarsePlates(seed, numPlates, numContinents, continentSi
         coarsePlateSeeds,
         coarsePlateVec,
         coarsePlateIsOcean,
+        continentMotion,
+        assemblyInfo,
     };
 }
 

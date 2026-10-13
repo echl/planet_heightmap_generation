@@ -28,7 +28,9 @@ function readSliders() {
         thermalErosion: +document.getElementById('sTEr').value,
         ridgeSharpening: +document.getElementById('sRs').value,
         glacialErosion: +document.getElementById('sGl').value,
+        glacialPhase: +(document.getElementById('sGlP')?.value ?? 0),
         continentSizeVariety: +document.getElementById('sCsv').value,
+        continentAssembly: +(document.getElementById('sSa')?.value ?? 0),
         temperatureOffset: +document.getElementById('sTmp').value,
         precipitationOffset: +document.getElementById('sPrc').value,
         landCoverage: +document.getElementById('sLc').value,
@@ -46,6 +48,7 @@ function readSlidersOptional() {
         thermalErosion: +(document.getElementById('sTEr')?.value ?? 0),
         ridgeSharpening: +(document.getElementById('sRs')?.value ?? 0),
         glacialErosion: +(document.getElementById('sGl')?.value ?? 0),
+        glacialPhase: +(document.getElementById('sGlP')?.value ?? 0),
     };
 }
 
@@ -391,6 +394,7 @@ if (worker) {
                 d.r_elevation = msg.r_elevation;
                 d.t_elevation = msg.t_elevation;
                 d.debugLayers.erosionDelta = msg.erosionDelta;
+                if (msg.glacialLayers) Object.assign(d.debugLayers, msg.glacialLayers);
                 if (msg.r_wind_east_summer) {
                     d.r_wind_east_summer = msg.r_wind_east_summer;
                     d.r_wind_north_summer = msg.r_wind_north_summer;
@@ -716,7 +720,7 @@ function generateFallback(overrideSeed, toggledIndices, onProgress, skipClimate)
     // Dynamic import already resolved — run synchronously via rAF stages
     const m = _fallbackModules;
     const btn = document.getElementById('generate');
-    const { N, P, jitter, nMag, numContinents, terrainWarp, smoothing, hydraulicErosion, thermalErosion, ridgeSharpening, glacialErosion, continentSizeVariety, temperatureOffset, precipitationOffset, landCoverage } = readSliders();
+    const { N, P, jitter, nMag, numContinents, terrainWarp, smoothing, hydraulicErosion, thermalErosion, ridgeSharpening, glacialErosion, continentSizeVariety, continentAssembly, temperatureOffset, precipitationOffset, landCoverage } = readSliders();
     const progress = onProgress || (() => {});
     const ctx = {};
 
@@ -730,7 +734,7 @@ function generateFallback(overrideSeed, toggledIndices, onProgress, skipClimate)
         }},
         { pct: 10, label: 'Generating coarse plates\u2026', work() {
             const { coarseMesh, coarse_xyz, coarse_r_plate, coarsePlateSeeds, coarsePlateVec, coarsePlateIsOcean } =
-                m.coarsePlates.generateCoarsePlates(ctx.seed, P, numContinents, continentSizeVariety, landCoverage);
+                m.coarsePlates.generateCoarsePlates(ctx.seed, P, numContinents, continentSizeVariety, landCoverage, continentAssembly);
             ctx.coarseMesh = coarseMesh; ctx.coarse_xyz = coarse_xyz;
             ctx.coarse_r_plate = coarse_r_plate;
             ctx.plateSeeds = coarsePlateSeeds; ctx.plateVec = coarsePlateVec;
@@ -947,13 +951,13 @@ export function editRecomputeViaWorker(onDone, skipClimate = false) {
     _onDone = onDone || null;
     _t0 = performance.now();
 
-    const { nMag, terrainWarp, smoothing, glacialErosion, hydraulicErosion, thermalErosion, ridgeSharpening, temperatureOffset, precipitationOffset, landCoverage } = readSliders();
+    const { nMag, terrainWarp, smoothing, glacialErosion, glacialPhase, hydraulicErosion, thermalErosion, ridgeSharpening, temperatureOffset, precipitationOffset, landCoverage } = readSliders();
 
     worker.postMessage({
         cmd: 'editRecompute',
         plateIsOcean: Array.from(d.plateIsOcean),
         plateDensity: d.plateDensity,
-        nMag, terrainWarp, smoothing, glacialErosion, hydraulicErosion, thermalErosion, ridgeSharpening,
+        nMag, terrainWarp, smoothing, glacialErosion, glacialPhase, hydraulicErosion, thermalErosion, ridgeSharpening,
         temperatureOffset, precipitationOffset, landCoverage,
         skipClimate
     });

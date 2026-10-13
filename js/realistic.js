@@ -14,12 +14,18 @@ const CLOUD_R = 1.0016;          // cloud shell radius (a few km up)
 const dummyTex = new THREE.DataTexture(new Uint8Array([0, 0]), 1, 1, THREE.RGFormat, THREE.UnsignedByteType);
 dummyTex.needsUpdate = true;
 
+const dummyWind = new THREE.DataTexture(new Uint8Array([128, 128, 128, 128]), 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
+dummyWind.needsUpdate = true;
+
 export const realUniforms = {
     realFx: { value: 0 },
     sunObj: { value: new THREE.Vector3(1, 0, 0) },
     cloudTex: { value: dummyTex },
     cloudSeason: { value: 0.5 },     // 1 = northern-summer precipitation, 0 = winter
     cloudDrift: { value: 0 },
+    cloudEvo: { value: 0 },
+    cloudWindTex: { value: dummyWind },   // RGBA8: summer E,N then winter E,N wind (speed-scaled unit vectors, 0.5 = calm)
+    cloudWindOn: { value: 0 },          // time offset that makes the cloud shapes evolve (octaves slide at different speeds)
 };
 
 const NOISE_GLSL = `
@@ -43,18 +49,49 @@ const CLOUD_GLSL = `
 uniform sampler2D cloudTex;
 uniform float cloudSeason;
 uniform float cloudDrift;
-float cloudDensity(vec3 d) {
-    vec2 uv = vec2(atan(d.z, d.x) * 0.15915494 + 0.5, asin(clamp(d.y, -1.0, 1.0)) * 0.31830989 + 0.5);
-    vec2 pc = texture2D(cloudTex, uv).rg;
-    float cov = clamp(0.02 + 0.5 * mix(pc.g, pc.r, cloudSeason), 0.0, 0.6);
-    float ca = cos(cloudDrift), sa = sin(cloudDrift);
+uniform float cloudEvo;
+uniform sampler2D cloudWindTex;
+uniform float cloudWindOn;
+// Cloud pattern at direction d, with the noise domain turned about the pole by angle a (moves the pattern east/west).
+float cloudField(vec3 d, float a) {
+    float ca = cos(a), sa = sin(a);
     vec3 q = vec3(ca * d.x + sa * d.z, d.y, -sa * d.x + ca * d.z);
-    vec3 w = vec3(vnoise(q * 3.0), vnoise(q * 3.0 + 7.3), vnoise(q * 3.0 + 3.1)) - 0.5;
+    vec3 ev = vec3(cloudEvo);
+    vec3 w = vec3(vnoise(q * 3.0 + ev * vec3(0.6, 0.2, 0.4)), vnoise(q * 3.0 + 7.3 + ev * vec3(0.3, 0.7, 0.1)), vnoise(q * 3.0 + 3.1 + ev * vec3(0.2, 0.4, 0.8))) - 0.5;
     q = q * 5.0 + w * 1.3;
-    float n = 0.50 * vnoise(q) + 0.25 * vnoise(q * 2.1) + 0.125 * vnoise(q * 4.3)
-            + 0.0625 * vnoise(q * 8.7) + 0.03 * vnoise(q * 17.0);
-    n /= 0.9675;
-    float th = 0.68 - 0.40 * cov;
+    float n = 0.50 * vnoise(q + ev * vec3(0.5, 0.0, 0.3)) + 0.25 * vnoise(q * 2.1 + ev * vec3(0.0, 0.9, 0.4))
+            + 0.125 * vnoise(q * 4.3 + ev * vec3(0.8, 0.3, 0.0)) + 0.0625 * vnoise(q * 8.7 + ev * vec3(0.0, 0.5, 1.2)) + 0.03 * vnoise(q * 17.0);
+    return n / 0.9675;
+}
+// cloudDrift is the wind clock. The pattern is carried by the model's own wind field (summer and winter fields, blended with
+// the same seasonal weight as precipitation), so it follows the trades, westerlies and polar easterlies, monsoon reversals and
+// the flow around continents. Without wind data it falls back to u(lat) = -cos(4 lat). A varying wind would smear the pattern
+// without limit, so two copies advected over a bounded window are cross-faded (a flow-map blend).
+// Where clouds form comes from the model's precipitation: wet regions fill with cloud, dry ones stay clear, and the moving
+// pattern is therefore thickened as it blows over wet ground and burns off over dry ground.
+float cloudDensity(vec3 d) {
+    float lat = asin(clamp(d.y, -1.0, 1.0));
+    vec2 uv = vec2(atan(d.z, d.x) * 0.15915494 + 0.5, lat * 0.31830989 + 0.5);
+    vec2 pc = texture2D(cloudTex, uv).rg;
+    float p = mix(pc.g, pc.r, cloudSeason);
+    float cov = clamp(0.02 + 0.65 * pow(p, 1.5), 0.0, 0.67);
+    vec3 east = normalize(vec3(-d.z, 0.0, d.x) + vec3(1e-5, 0.0, 0.0));
+    vec3 north = cross(east, d);
+    vec2 wv;                                            // (east, north), 0..1 in magnitude
+    if (cloudWindOn > 0.5) {
+        vec4 wt = texture2D(cloudWindTex, uv);
+        wv = (mix(wt.zw, wt.xy, cloudSeason) * 2.0 - 1.0);
+        wv *= pow(max(length(wv), 1e-4), -0.4);         // lift weak winds: speed -> speed^0.6
+    } else {
+        wv = vec2(-cos(4.0 * lat), 0.0);
+    }
+    vec3 vel = (east * wv.x + north * wv.y) * 0.6;      // chord length carried per cycle
+    float ph = cloudDrift / 0.6;
+    float f1 = fract(ph), f2 = fract(ph + 0.5);
+    float w1 = 1.0 - abs(2.0 * f1 - 1.0);
+    float n = w1 * cloudField(normalize(d - vel * f1), 0.0) + (1.0 - w1) * cloudField(normalize(d - vel * f2), 0.0);
+    n = 0.5 + (n - 0.5) * 1.15;                           // averaging two copies flattens the contrast a little
+    float th = 0.70 - 0.40 * cov;
     return smoothstep(th, th + 0.18, n);
 }
 `;
@@ -67,13 +104,18 @@ export function applyRealisticTerrain(mat) {
         Object.assign(shader.uniforms, realUniforms);
         shader.vertexShader = shader.vertexShader
             .replace('#include <common>', `#include <common>
-varying vec3 vOP; varying float vHk; varying vec3 vNX; varying vec3 vNY; varying vec3 vNZ;`)
+varying vec3 vOP; varying float vHk; varying vec3 vNX; varying vec3 vNY; varying vec3 vNZ;
+attribute vec3 triA; attribute vec3 triB; attribute vec3 triC;
+varying vec3 vTA; varying vec3 vTB; varying vec3 vTC; varying vec3 vBary; varying vec3 vON;`)
             .replace('#include <begin_vertex>', `#include <begin_vertex>
 vOP = position; vHk = (length(position) - 1.0) * ${R_KM}.0;
+vTA = triA; vTB = triB; vTC = triC; vON = objectNormal;
+int vi = gl_VertexID % 3; vBary = vec3(vi == 0 ? 1.0 : 0.0, vi == 1 ? 1.0 : 0.0, vi == 2 ? 1.0 : 0.0);
 vNX = normalMatrix * vec3(1.0, 0.0, 0.0); vNY = normalMatrix * vec3(0.0, 1.0, 0.0); vNZ = normalMatrix * vec3(0.0, 0.0, 1.0);`);
         shader.fragmentShader = shader.fragmentShader
             .replace('#include <common>', `#include <common>
 varying vec3 vOP; varying float vHk; varying vec3 vNX; varying vec3 vNY; varying vec3 vNZ;
+varying vec3 vTA; varying vec3 vTB; varying vec3 vTC; varying vec3 vBary; varying vec3 vON;
 varying float vSnow;
 uniform float realFx; uniform vec3 sunObj;
 ${NOISE_GLSL}${CLOUD_GLSL}
@@ -85,15 +127,36 @@ float microH(vec3 p, float fw) {
             .replace('#include <color_fragment>', `#include <color_fragment>
 if (realFx > 0.5) {
     float fw = length(fwidth(vOP));
+    {   // break the straight Voronoi edges: warp the barycentric weights of the corner colours with noise
+        vec3 pl = vBary.x * vTA + vBary.y * vTB + vBary.z * vTC;
+        vec3 nb = vec3(vnoise(vOP * 190.0), vnoise(vOP * 190.0 + 17.0), vnoise(vOP * 190.0 + 41.0)) * 0.65
+                + vec3(vnoise(vOP * 520.0 + 5.0), vnoise(vOP * 520.0 + 23.0), vnoise(vOP * 520.0 + 59.0)) * 0.35 - 0.5;
+        vec3 wb = max(vBary + nb * 0.95, 0.0);
+        wb /= max(wb.x + wb.y + wb.z, 1e-4);
+        diffuseColor.rgb += wb.x * vTA + wb.y * vTB + wb.z * vTC - pl;
+        diffuseColor.rgb = max(diffuseColor.rgb, vec3(0.0));
+    }
     float n = 0.45 * vnoise(vOP * 60.0) + 0.30 * vnoise(vOP * 210.0) * lodw(210.0, fw)
             + 0.15 * vnoise(vOP * 760.0) * lodw(760.0, fw) + 0.10 * vnoise(vOP * 2600.0) * lodw(2600.0, fw);
     float lw = 0.45 + 0.30 * lodw(210.0, fw) + 0.15 * lodw(760.0, fw) + 0.10 * lodw(2600.0, fw);
     n = n / lw - 0.5;
-    float land = smoothstep(-0.02, 0.05, vHk);
+    float land = smoothstep(-0.02, 0.05, vHk);   // 0 sea, 1 land
     float amp = mix(0.10, 0.34, land);
     diffuseColor.rgb *= 1.0 + amp * n;
     float tint = vnoise(vOP * 30.0) - 0.5;
     diffuseColor.rgb *= vec3(1.0 + 0.10 * tint, 1.0 + 0.04 * tint, 1.0 - 0.10 * tint) * land + vec3(1.0) * (1.0 - land);
+    if (land > 0.5) {   // patchy vegetation / soil, and bare rock where the ground is steep
+        float pa = (vnoise(vOP * 11.0) - 0.5) + 0.6 * (vnoise(vOP * 27.0) - 0.5) + 0.35 * (vnoise(vOP * 70.0) - 0.5) * lodw(70.0, fw);
+        diffuseColor.rgb *= vec3(1.0 + 0.30 * pa, 1.0 + 0.12 * pa, 1.0 - 0.26 * pa);
+        float pb = vnoise(vOP * 150.0 + 3.0) - 0.5;
+        diffuseColor.rgb *= 1.0 + 0.16 * pb * smoothstep(0.0, 0.6, diffuseColor.g);
+        vec3 nO0 = normalize(vOP);
+        vec3 sv = vON - nO0 * dot(vON, nO0);
+        float slope = length(sv) / max(dot(vON, nO0), 0.2);
+        float rk = smoothstep(0.018, 0.075, slope + 0.02 * pa) * smoothstep(0.15, 0.7, vHk);
+        float rn = 0.6 + 0.8 * vnoise(vOP * 240.0) * lodw(240.0, fw) + 0.5 * vnoise(vOP * 800.0) * lodw(800.0, fw);
+        diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.30, 0.27, 0.235) * rn, clamp(rk * 0.75, 0.0, 0.75));
+    }
     // cloud shadows on the ground (the sun's ray up to the cloud shell)
     if (vSnow > 0.02) {   // ragged snow edge: the cell's cover against fractal noise
         float sn = vSnow * 0.95;
@@ -125,7 +188,7 @@ if (realFx > 0.5) {
 }`);
     };
     const type = mat.type, oldKey = mat.customProgramCacheKey;
-    mat.customProgramCacheKey = () => oldKey.call(mat) + '+real2-' + type;
+    mat.customProgramCacheKey = () => oldKey.call(mat) + '+real5-' + type;
     mat.needsUpdate = true;
 }
 
@@ -157,7 +220,33 @@ if (realFx > 0.5) {
 }
 
 // ── Clouds ───────────────────────────────────────────────────────────────────────────────
-let cloudMesh = null, _cloudKey = null;
+let cloudMesh = null, _cloudKey = null, _cloudDriftAcc = 0, _cloudEvoAcc = 0;
+
+// Separable box blur of the RGBA8 wind texture (wraps in longitude). Cell-to-cell wind noise would otherwise displace the
+// cloud pattern texel by texel and give it hard, broken edges; the winds that carry clouds are large-scale.
+function blurWind(data, W, H, radius, passes) {
+    const tmp = new Float32Array(W * H * 4), cur = new Float32Array(W * H * 4);
+    for (let i = 0; i < cur.length; i++) cur[i] = data[i];
+    const n = 2 * radius + 1;
+    for (let pass = 0; pass < passes; pass++) {
+        for (let j = 0; j < H; j++) for (let c = 0; c < 4; c++) {
+            let sum = 0;
+            for (let k = -radius; k <= radius; k++) sum += cur[(j * W + ((k % W) + W) % W) * 4 + c];
+            for (let i = 0; i < W; i++) {
+                tmp[(j * W + i) * 4 + c] = sum / n;
+                sum += cur[(j * W + (i + radius + 1) % W) * 4 + c] - cur[(j * W + ((i - radius) % W + W) % W) * 4 + c];
+            }
+        }
+        for (let i = 0; i < W; i++) for (let c = 0; c < 4; c++) {
+            for (let j = 0; j < H; j++) {
+                let sum = 0;
+                for (let k = -radius; k <= radius; k++) sum += tmp[(Math.min(H - 1, Math.max(0, j + k)) * W + i) * 4 + c];
+                cur[(j * W + i) * 4 + c] = sum / n;
+            }
+        }
+    }
+    for (let i = 0; i < cur.length; i++) data[i] = Math.round(cur[i]);
+}
 
 function buildCloudTexture(cd) {
     const W = 720, H = 360, mesh = cd.mesh, N = mesh.numRegions, xyz = cd.r_xyz;
@@ -172,6 +261,17 @@ function buildCloudTexture(cd) {
         bins[by * BW + bx].push(r);
     }
     const data = new Uint8Array(W * H * 2);
+    const wE = [cd.r_wind_east_summer, cd.r_wind_north_summer, cd.r_wind_east_winter, cd.r_wind_north_winter];
+    const haveWind = !!(wE[0] && wE[1] && wE[2] && wE[3]);
+    // wind speed relative to the 95th percentile of each season (as the model's own 0..1 wind speed)
+    const wRef = [1, 1];
+    if (haveWind) for (let k = 0; k < 2; k++) {
+        const sp = new Float32Array(N);
+        for (let r = 0; r < N; r++) sp[r] = Math.hypot(wE[2 * k][r], wE[2 * k + 1][r]);
+        sp.sort();
+        wRef[k] = sp[Math.floor(0.95 * (N - 1))] || 1;
+    }
+    const wdata = new Uint8Array(W * H * 4).fill(128);
     for (let j = 0; j < H; j++) {
         const lat = ((j + 0.5) / H - 0.5) * Math.PI, cl = Math.cos(lat), sl = Math.sin(lat);
         const by = Math.min(BH - 1, Math.floor(((j + 0.5) / H) * BH));
@@ -196,6 +296,13 @@ function buildCloudTexture(cd) {
             if (best >= 0) {
                 data[o] = Math.max(0, Math.min(255, Math.round(255 * ps[best])));
                 data[o + 1] = Math.max(0, Math.min(255, Math.round(255 * pw[best])));
+                if (haveWind) {
+                    for (let k = 0; k < 2; k++) {
+                        const e = wE[2 * k][best], n = wE[2 * k + 1][best], m = Math.hypot(e, n) || 1, sp = Math.min(1, m / wRef[k]);
+                        wdata[(j * W + i) * 4 + 2 * k] = Math.max(0, Math.min(255, Math.round(127.5 + 127.5 * e / m * sp)));
+                        wdata[(j * W + i) * 4 + 2 * k + 1] = Math.max(0, Math.min(255, Math.round(127.5 + 127.5 * n / m * sp)));
+                    }
+                }
             }
         }
     }
@@ -203,7 +310,12 @@ function buildCloudTexture(cd) {
     tex.wrapS = THREE.RepeatWrapping; tex.wrapT = THREE.ClampToEdgeWrapping;
     tex.minFilter = tex.magFilter = THREE.LinearFilter; tex.generateMipmaps = false;
     tex.needsUpdate = true;
-    return tex;
+    if (haveWind) blurWind(wdata, W, H, 10, 3);
+    const wtex = new THREE.DataTexture(wdata, W, H, THREE.RGBAFormat, THREE.UnsignedByteType);
+    wtex.wrapS = THREE.RepeatWrapping; wtex.wrapT = THREE.ClampToEdgeWrapping;
+    wtex.minFilter = wtex.magFilter = THREE.LinearFilter; wtex.generateMipmaps = false;
+    wtex.needsUpdate = true;
+    return { tex, wtex, haveWind };
 }
 
 function ensureCloudMesh() {
@@ -244,7 +356,11 @@ export function tickRealistic() {
     const cd = state.curData;
     if (_cloudKey !== cd.r_precip_summer) {
         const t = buildCloudTexture(cd);
-        if (t) { if (realUniforms.cloudTex.value !== dummyTex) realUniforms.cloudTex.value.dispose(); realUniforms.cloudTex.value = t; }
+        if (t) {
+            if (realUniforms.cloudTex.value !== dummyTex) realUniforms.cloudTex.value.dispose();
+            if (realUniforms.cloudWindTex.value !== dummyWind) realUniforms.cloudWindTex.value.dispose();
+            realUniforms.cloudTex.value = t.tex; realUniforms.cloudWindTex.value = t.wtex; realUniforms.cloudWindOn.value = t.haveWind ? 1 : 0;
+        }
         _cloudKey = cd.r_precip_summer;
     }
     const cm = ensureCloudMesh();
@@ -253,7 +369,11 @@ export function tickRealistic() {
     cm.rotation.y = th;
     const m = state.seasonMonth == null ? 6 : state.seasonMonth;
     realUniforms.cloudSeason.value = 0.5 * (1 + Math.cos(2 * Math.PI * (m - HYDROLOGY.summerMonth) / 12));
-    realUniforms.cloudDrift.value = performance.now() * 1e-3 * 2e-4;
+    // Prevailing winds carry the cloud pattern (the wind clock runs fast while Auto Rotate is on, slowly otherwise).
+    const rot = document.getElementById('chkRotate');
+    if (rot && rot.checked) { _cloudDriftAcc += 0.003; _cloudEvoAcc += 0.0035; }
+    realUniforms.cloudEvo.value = _cloudEvoAcc + performance.now() * 1e-3 * 0.01;
+    realUniforms.cloudDrift.value = _cloudDriftAcc + performance.now() * 1e-3 * 0.02;
     const s = sunUniforms.sunDir.value, c = Math.cos(th), sn = Math.sin(th);
     realUniforms.sunObj.value.set(s.x * c - s.z * sn, s.y, s.x * sn + s.z * c).normalize();
 }

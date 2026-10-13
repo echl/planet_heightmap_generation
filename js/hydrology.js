@@ -47,6 +47,7 @@ export const HYDROLOGY = {
     // accumulates as permanent ice, so the cell sheds no local runoff. Its precipitation leaves as
     // glacier outflow and emerges at the first ice-free cell downstream (calving into the sea is lost).
     iceWarmSeasonC: 0,
+    glacierMeltScaleC: 8,        // glacier outflow in month m is weighted exp(T_m / this): summer-peaked meltwater
     // Frozen ground infiltrates little. Infiltration is scaled down linearly with the annual mean
     // temperature from permafrostStartC (no effect) to permafrostFullC (max reduction).
     permafrostStartC: -2,
@@ -330,19 +331,39 @@ export function computeHydrology(mesh, r_elevation, precipA, precipB, opts) {
         }
     }
     // Ice cells: no local runoff; their share is delivered to the first ice-free cell downstream
-    // each month (calving into the sea is lost).
+    // each month (calving into the sea is lost). Two refinements:
+    //  - Glacier meltwater peaks in summer: an ice cell's annual outflow is spread over the months
+    //    in proportion to exp(T / meltScaleC), T being the cell's monthly temperature, instead of
+    //    leaving evenly all year (total unchanged).
+    //  - Ice flows down the ice surface, not the bed: when the glacial module supplies an ice
+    //    thickness (opts.iceThicknessKm), glacier outflow is routed on bed + ice height, so it can
+    //    cross divides and leave a dome in a different direction than the rock beneath would.
     if (iceCells) {
         const carry = new Float32Array(N);
+        const thick = o.iceThicknessKm || null;
+        let iceRoute = flowTo, iceOrder = order, iceN = nOrder;
+        if (thick) {
+            const km = new Float32Array(N);
+            for (let r = 0; r < N; r++) km[r] = elevToHeightKm(r_elevation[r]) + (r_ice[r] ? Math.max(thick[r], 0.1) : 0);
+            const fr = floodRoute(mesh, km, isOcean, oceanCount);
+            iceRoute = fr.flowTo; iceOrder = fr.order; iceN = fr.nOrder;
+        }
+        const wSm = new Float32Array(NM);
+        for (let m = 0; m < NM; m++) wSm[m] = 0.5 * (1 + Math.cos(2 * Math.PI * (m - H.summerMonth) / NM));
+        const meltW = (r, m) => Math.exp((wSm[m] * (-45 + 90 * tempA[r]) + (1 - wSm[m]) * (-45 + 90 * tempB[r])) / H.glacierMeltScaleC);
+        const wsum = hasTemp ? new Float32Array(N) : null;
+        if (wsum) for (let r = 0; r < N; r++) if (r_ice[r]) { let sw = 0; for (let m = 0; m < NM; m++) sw += meltW(r, m); wsum[r] = sw; }
         for (let m = 0; m < NM; m++) {
             const rm = runoffM[m];
             carry.fill(0);
-            for (let i = nOrder - 1; i >= 0; i--) {             // upstream first
-                const r = order[i];
+            for (let i = iceN - 1; i >= 0; i--) {               // upstream first
+                const r = iceOrder[i];
                 if (isOcean[r]) continue;
                 if (r_ice[r]) {
-                    const pass = rm[r] + carry[r];
+                    const own = wsum ? rm[r] * NM * meltW(r, m) / wsum[r] : rm[r];
+                    const pass = own + carry[r];
                     rm[r] = 0;
-                    const t = flowTo[r];
+                    const t = iceRoute[r];
                     if (t >= 0 && !isOcean[t]) carry[t] += pass; else iceCalvedKm2 += pass / NM;
                 } else if (carry[r] > 0) {
                     rm[r] += carry[r];
@@ -619,6 +640,7 @@ export function getHydrology(curData) {
         basinWeight: dl.basinWeight || null,
         cratonWeight: dl.cratonWeight || null,
         foldBeltWeight: dl.foldBeltWeight || null,
+        iceThicknessKm: dl.iceThickness || null,
     } : undefined);
     curData._hydro = { elev: curData.r_elevation, a, b, ta, tb, dl, sig, result };
     return result;
