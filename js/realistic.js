@@ -5,7 +5,7 @@
 
 import * as THREE from 'three';
 import { state } from './state.js';
-import { scene, sunUniforms } from './scene.js';
+import { scene, sunUniforms, setSeasonTilt } from './scene.js';
 import { HYDROLOGY } from './hydrology.js';
 
 const R_KM = 6371;
@@ -220,6 +220,7 @@ if (realFx > 0.5) {
 }
 
 // ── Clouds ───────────────────────────────────────────────────────────────────────────────
+const _qObj = new THREE.Quaternion(), _qSpin = new THREE.Quaternion(), _yAxis = new THREE.Vector3(0, 1, 0);
 let cloudMesh = null, _cloudKey = null, _cloudDriftAcc = 0, _cloudEvoAcc = 0;
 
 // Separable box blur of the RGBA8 wind texture (wraps in longitude). Cell-to-cell wind noise would otherwise displace the
@@ -352,6 +353,7 @@ void main() {
 export function tickRealistic() {
     const on = !!(state.realisticRelief && !state.mapMode && state.planetMesh && state.curData);
     realUniforms.realFx.value = on ? 1 : 0;
+    setSeasonTilt(on);
     if (!on) { if (cloudMesh) cloudMesh.visible = false; return; }
     const cd = state.curData;
     if (_cloudKey !== cd.r_precip_summer) {
@@ -374,6 +376,7 @@ export function tickRealistic() {
     if (rot && rot.checked) { _cloudDriftAcc += 0.003; _cloudEvoAcc += 0.0035; }
     realUniforms.cloudEvo.value = _cloudEvoAcc + performance.now() * 1e-3 * 0.01;
     realUniforms.cloudDrift.value = _cloudDriftAcc + performance.now() * 1e-3 * 0.02;
-    const s = sunUniforms.sunDir.value, c = Math.cos(th), sn = Math.sin(th);
-    realUniforms.sunObj.value.set(s.x * c - s.z * sn, s.y, s.x * sn + s.z * c).normalize();
+    // the sun in the planet's own frame: undo the planet's spin and the scene's seasonal tilt
+    _qObj.copy(scene.quaternion).multiply(_qSpin.setFromAxisAngle(_yAxis, th)).invert();
+    realUniforms.sunObj.value.copy(sunUniforms.sunDir.value).applyQuaternion(_qObj).normalize();
 }

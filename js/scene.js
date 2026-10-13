@@ -4,7 +4,22 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 export const canvas   = document.getElementById('canvas');
-export const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+// Some browsers/WebViews refuse a context with antialiasing (or a high-performance
+// GPU request), so retry with progressively safer settings before giving up.
+function createRenderer() {
+    const attempts = [
+        { antialias: true },
+        { antialias: false },
+        { antialias: false, powerPreference: 'low-power' },
+    ];
+    let lastErr = null;
+    for (const opts of attempts) {
+        try { return new THREE.WebGLRenderer({ canvas, ...opts }); }
+        catch (e) { lastErr = e; }
+    }
+    throw new Error('WebGL is not available in this browser or viewer. Try opening the page in a regular browser tab with hardware acceleration enabled. (' + (lastErr && lastErr.message) + ')');
+}
+export const renderer = createRenderer();
 renderer.setSize(innerWidth, innerHeight);
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 // Shadow mapping is only used with Realistic Elevation (see setShadowsWanted). The map is refreshed on
@@ -96,7 +111,8 @@ export const shadowUniforms = {
 // On: a world-fixed sun placed at the sub-solar point (longitude, and a latitude equal to the solar
 // declination for the current month: +23.44 deg at the northern summer solstice), weak bluish
 // ambient "skylight", so the planet has a lit day side, a terminator and a dim night side.
-let _sunOn = false, _sunLon = 40, _sunMonth = 6;
+let _sunOn = false, _sunLon = 40, _sunMonth = 6, _tiltOn = false;
+const _tiltQ = new THREE.Quaternion(), _sunWorld = new THREE.Vector3(5, 3, 4).normalize();
 // The same light, as uniforms for custom shaders (river ribbons) that are not lit by three.js:
 // outgoing = albedo * (ambient + sunRGB * max(0, N.L)) / PI, matching MeshLambertMaterial.
 export const sunUniforms = {
@@ -106,25 +122,36 @@ export const sunUniforms = {
     dayOnly: { value: 0 },       // 1 in Realistic mode (a real sun with a night side); 0 = original flat lighting
 };
 function applySun() {
+    _tiltQ.identity();
     if (!_sunOn) {
         ambient.intensity = 3.5; sun.intensity = 1.5; sun.position.set(5, 3, 4);
+        _sunWorld.set(5, 3, 4).normalize();
     } else {
         ambient.intensity = 0.02; sun.intensity = 4.2;      // night side: almost black (just starlight)
+        // The sun stays on the ecliptic (the equatorial plane); the seasons come from the planet's axis, which leans toward the
+        // sun by the solar declination (+23.44 deg at the northern summer solstice, 0 at the equinoxes, -23.44 at the winter solstice).
         const dec = 23.44 * Math.sin(2 * Math.PI * (_sunMonth - 3) / 12) * Math.PI / 180;
         const lon = _sunLon * Math.PI / 180;
-        sun.position.set(Math.cos(dec) * Math.cos(lon), Math.sin(dec), Math.cos(dec) * Math.sin(lon)).multiplyScalar(10);
+        _sunWorld.set(Math.cos(lon), 0, Math.sin(lon));
+        if (_tiltOn) _tiltQ.setFromAxisAngle(new THREE.Vector3(0, 1, 0).cross(_sunWorld).normalize(), dec);
+        else _sunWorld.set(Math.cos(dec) * Math.cos(lon), Math.sin(dec), Math.cos(dec) * Math.sin(lon));   // no tilt (flat map): fall back to a moving sun
+        sun.position.copy(_sunWorld).applyQuaternion(_tiltQ.clone().invert()).multiplyScalar(10);   // the light is a child of the (tilted) scene
     }
+    scene.quaternion.copy(_tiltQ);
     sun.castShadow = _shadowsWanted && _sunOn;
     shadowUniforms.shadowOn.value = sun.castShadow ? 1 : 0;
     requestShadowUpdate();
     sunUniforms.dayOnly.value = _sunOn ? 1 : 0;
-    sunUniforms.sunDir.value.copy(sun.position).normalize();
+    sunUniforms.sunDir.value.copy(_sunWorld);
     sunUniforms.sunRGB.value.set(sun.color.r, sun.color.g, sun.color.b).multiplyScalar(sun.intensity);
     sunUniforms.ambRGB.value.set(ambient.color.r, ambient.color.g, ambient.color.b).multiplyScalar(ambient.intensity);
 }
-export function setSunLighting(on) { _sunOn = on; applySun(); }
-export function setSunLongitude(deg) { _sunLon = deg; applySun(); }
-export function setSunMonth(m) { _sunMonth = m; applySun(); }
+function syncStars() { if (starsMesh) starsMesh.quaternion.copy(_tiltQ).invert(); }   // the stars do not tilt with the planet
+export function setSunLighting(on) { _sunOn = on; applySun(); syncStars(); }
+export function setSunLongitude(deg) { _sunLon = deg; applySun(); syncStars(); }
+export function setSunMonth(m) { _sunMonth = m; applySun(); syncStars(); }
+// Globe view in Realistic mode: tilt the planet's axis for the season (off in the flat map view).
+export function setSeasonTilt(on) { if (on !== _tiltOn) { _tiltOn = on; applySun(); syncStars(); } }
 applySun();
 
 // Stars
