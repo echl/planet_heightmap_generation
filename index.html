@@ -196,8 +196,8 @@
                     <div class="slider-hint"><span>Equal</span><span>Varied</span></div>
                 </div>
                 <div class="cg">
-                    <label>Supercontinent Assembly <span class="tip" data-tip="Plays the continents' drift forward to model the supercontinent cycle — at 0 they are dispersed, as generated; as it rises they drift together as rigid plates, collide and weld into one supercontinent. Their drift also feeds the plate-motion model, so the sutures get collision tectonics">?</span> <span class="v" id="vSa">0</span></label>
-                    <input type="range" id="sSa" min="0" max="1" value="0" step="0.05">
+                    <label>Supercontinent Assembly <span class="tip" data-tip="Plays the continents' drift forward to model the supercontinent cycle — at 0 they are dispersed, as generated; as it rises they drift together as rigid plates, collide and weld into one supercontinent. Their drift also feeds the plate-motion model, so the sutures get collision tectonics">?</span> <span class="v" id="vSa">0.50</span></label>
+                    <input type="range" id="sSa" min="0" max="1" value="0.5" step="0.05">
                     <div class="slider-hint"><span>Dispersed</span><span>Supercontinent</span></div>
                 </div>
                 <div class="cg">
@@ -369,14 +369,14 @@
                     <label class="toggle-label"><input type="checkbox" id="chkWire"><span class="toggle-track"><span class="toggle-thumb"></span></span>Wireframe</label>
                     <label class="toggle-label"><input type="checkbox" id="chkPlates"><span class="toggle-track"><span class="toggle-thumb"></span></span>Show Plates</label>
                     <label class="toggle-label"><input type="checkbox" id="chkRotate"><span class="toggle-track"><span class="toggle-thumb"></span></span>Auto-Rotate</label>
-                    <label class="toggle-label"><input type="checkbox" id="chkGrid" checked><span class="toggle-track"><span class="toggle-thumb"></span></span>Grid Lines</label>
+                    <label class="toggle-label"><input type="checkbox" id="chkGrid"><span class="toggle-track"><span class="toggle-thumb"></span></span>Grid Lines</label>
                     <label class="toggle-label" id="realisticRow" style="display:none"><input type="checkbox" id="chkRealRelief"><span class="toggle-track"><span class="toggle-thumb"></span></span>Realistic</label>
                     <div class="cg" id="sunGroup" style="display:none">
                         <label>Sun Longitude <span class="v" id="vSunLon">40°</span></label>
                         <input type="range" id="sSunLon" min="0" max="360" value="40" step="1">
                     </div>
                     <label class="toggle-label"><input type="checkbox" id="chkWater" checked><span class="toggle-track"><span class="toggle-thumb"></span></span>Rivers &amp; Lakes</label>
-                    <label class="toggle-label"><input type="checkbox" id="chkStreams" checked><span class="toggle-track"><span class="toggle-thumb"></span></span>Small Streams</label>
+                    <label class="toggle-label"><input type="checkbox" id="chkStreams"><span class="toggle-track"><span class="toggle-thumb"></span></span>Small Streams</label>
                     <label class="toggle-label"><input type="checkbox" id="chkSnow" checked><span class="toggle-track"><span class="toggle-thumb"></span></span>Seasonal Snow</label>
                     <div class="cg" id="seasonGroup">
                         <label>Month <span class="v" id="vMonth">Jul</span></label>
@@ -384,7 +384,7 @@
                     </div>
                     <label class="toggle-label"><input type="checkbox" id="chkSeasonPlay"><span class="toggle-track"><span class="toggle-thumb"></span></span>Animate Seasons</label>
                 </div>
-                <div class="cg" id="gridSpacingGroup">
+                <div class="cg" id="gridSpacingGroup" style="display:none">
                     <label>Grid Spacing</label>
                     <select id="gridSpacing">
                         <option value="30">30°</option>
