@@ -5,7 +5,7 @@
 
 import * as THREE from 'three';
 import { state } from './state.js';
-import { scene, sunUniforms, setSeasonTilt } from './scene.js';
+import { scene, sunUniforms, setSeasonTilt, camera } from './scene.js';
 import { HYDROLOGY } from './hydrology.js';
 
 const R_KM = 6371;
@@ -399,12 +399,90 @@ void main() {
     return cloudMesh;
 }
 
+// ── Aurora ───────────────────────────────────────────────────────────────────────────────
+// A volume of glowing air between ~80 and 400 km, ray-marched in a shell around the planet and shown only in Realistic mode
+// while Auto Rotate is on. It lives in the planet's axis frame (it does not spin with the ground), forms an oval around each
+// magnetic pole, shows only in darkness, and comes and goes in slow bursts. Colour follows the altitude of the emission:
+// a violet-blue lower fringe, the green 557 nm band near 110 km, and faint red above 200 km.
+const AURORA_R = 1.065;
+let auroraMesh = null;
+const auroraU = { camObj: { value: new THREE.Vector3() }, sunA: { value: new THREE.Vector3(1, 0, 0) }, auroraT: { value: 0 } };
+function ensureAuroraMesh() {
+    if (auroraMesh) return auroraMesh;
+    const mat = new THREE.ShaderMaterial({
+        uniforms: auroraU,
+        transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.FrontSide,
+        vertexShader: `varying vec3 vOP; void main() { vOP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+        fragmentShader: `varying vec3 vOP; uniform vec3 camObj; uniform vec3 sunA; uniform float auroraT;
+${NOISE_GLSL}
+const float ROUT = ${AURORA_R.toFixed(4)};
+float absLat(vec3 p) { return abs(asin(clamp(p.y / length(p), -1.0, 1.0))); }
+void main() {
+    vec3 ro = camObj, rd = normalize(vOP - ro);
+    float b = dot(ro, rd), c = dot(ro, ro) - ROUT * ROUT;
+    float hh = b * b - c;
+    if (hh <= 0.0) discard;
+    float t0 = max(-b - sqrt(hh), 0.0), t1 = -b + sqrt(hh);
+    float h2 = b * b - (dot(ro, ro) - 1.0);
+    if (h2 > 0.0) { float tp = -b - sqrt(h2); if (tp > 0.0) t1 = min(t1, tp); }   // the planet blocks the ray
+    if (t1 <= t0) discard;
+    // only rays that pass near a pole can show aurora
+    float latMax = max(absLat(ro + rd * t0), max(absLat(ro + rd * t1), absLat(ro + rd * 0.5 * (t0 + t1))));
+    if (latMax < 0.95) discard;
+    // slow bursts of activity, independent per hemisphere
+    float actN = smoothstep(0.42, 0.68, vnoise(vec3(auroraT * 0.03, 1.7, 0.3)));
+    float actS = smoothstep(0.42, 0.68, vnoise(vec3(auroraT * 0.03, 8.9, 5.1)));
+    if (actN + actS < 0.01) discard;
+    const int N = 56;
+    float ds = (t1 - t0) / float(N);
+    float jit = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+    vec3 sum = vec3(0.0);
+    for (int i = 0; i < N; i++) {
+        vec3 p = ro + rd * (t0 + (float(i) + jit) * ds);
+        float r = length(p);
+        float alt = (r - 1.0) * 6371.0;                         // km
+        if (alt < 70.0 || alt > 420.0) continue;
+        vec3 pn = p / r;
+        float lat = asin(clamp(pn.y, -1.0, 1.0)) * 57.2957795;
+        float lon = atan(pn.z, pn.x);
+        float act = lat > 0.0 ? actN : actS;
+        float dark = 1.0 - smoothstep(-0.10, 0.18, dot(pn, sunA));
+        if (act * dark < 0.01) continue;
+        // the auroral oval: a ring ~68 degrees from the equator, wobbling with longitude
+        float ov = abs(lat) - (67.0 + 3.0 * sin(lon * 2.0 + auroraT * 0.01) + 1.5 * sin(lon * 5.0 - auroraT * 0.02));
+        float oval = exp(-ov * ov / 10.0);
+        // curtains: folds that drift along the oval, with fine field-aligned rays
+        float fold = vnoise(vec3(lon * 14.0 + auroraT * 0.05, lat * 0.35, auroraT * 0.04));
+        float curtain = smoothstep(0.35, 0.75, fold);
+        float rays = 0.55 + 0.45 * vnoise(vec3(lon * 90.0, lat * 1.5, auroraT * 0.5));
+        float dens = oval * curtain * rays * act * dark;
+        float gG = exp(-pow((alt - 112.0) / 34.0, 2.0));
+        float gR = exp(-pow((alt - 240.0) / 70.0, 2.0)) * 0.16;
+        float gB = exp(-pow((alt - 88.0) / 12.0, 2.0)) * 0.35;
+        sum += dens * (vec3(0.10, 1.0, 0.38) * gG + vec3(0.95, 0.12, 0.25) * gR + vec3(0.35, 0.30, 1.0) * gB) * ds;
+    }
+    float lum = max(sum.r, max(sum.g, sum.b));
+    vec3 col = lum > 1e-6 ? sum / lum * (1.0 - exp(-lum * 12.0)) : vec3(0.0);   // tone-map the brightness only, so the hue stays green
+    if (max(col.r, max(col.g, col.b)) < 0.004) discard;
+    gl_FragColor = vec4(pow(col, vec3(1.7)) * 2.0, 1.0);   // the gamma keeps faint parts saturated once converted to sRGB
+    #include <colorspace_fragment>
+}`,
+    });
+    auroraMesh = new THREE.Mesh(new THREE.SphereGeometry(AURORA_R, 96, 64), mat);
+    auroraMesh.renderOrder = 3;
+    auroraMesh.frustumCulled = false;
+    auroraMesh.raycast = () => {};
+    auroraMesh.visible = false;
+    scene.add(auroraMesh);
+    return auroraMesh;
+}
+
 // Called every frame (cheap): keeps the cloud layer, sun direction and seasonal weights current.
 export function tickRealistic() {
     const on = !!(state.realisticRelief && !state.mapMode && state.planetMesh && state.curData);
     realUniforms.realFx.value = on ? 1 : 0;
     setSeasonTilt(on);
-    if (!on) { if (cloudMesh) cloudMesh.visible = false; return; }
+    if (!on) { if (cloudMesh) cloudMesh.visible = false; if (auroraMesh) auroraMesh.visible = false; return; }
     const cd = state.curData;
     if (_cloudKey !== cd.r_precip_summer) {
         const t = buildCloudTexture(cd);
@@ -436,6 +514,15 @@ export function tickRealistic() {
         if (rotOn && dth > 0 && dth < 0.05) _lightClock += dth / 0.0008 / 60;
         realUniforms.lightOn.value = rotOn ? 1 : 0;
         realUniforms.lightTime.value = _lightClock;
+        // aurora: visible only while the planet spins; its clock runs on the same spin-driven time
+        const am = ensureAuroraMesh();
+        am.visible = rotOn;
+        if (rotOn) {
+            auroraU.auroraT.value = _lightClock;
+            _qObj.copy(scene.quaternion).invert();
+            auroraU.camObj.value.copy(camera.position).applyQuaternion(_qObj);
+            auroraU.sunA.value.copy(sunUniforms.sunDir.value).applyQuaternion(_qObj).normalize();
+        }
     }
     realUniforms.cloudEvo.value = _cloudEvoAcc;
     realUniforms.cloudDrift.value = _cloudDriftAcc;
