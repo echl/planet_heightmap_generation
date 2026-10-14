@@ -96,7 +96,15 @@ sun.shadow.mapSize.set(4096, 4096);
 sun.shadow.bias = -0.00003;
 sun.shadow.normalBias = 0.0002;
 let _shadowsWanted = false;
-export function requestShadowUpdate() { renderer.shadowMap.needsUpdate = true; }
+// The shadow map (4096^2, the whole planet drawn from the sun) is redrawn only when something it depends on changes: the sun
+// (longitude, month, tilt), the planet's shape, or the planet's spin. A spinning planet cannot reuse the map rigidly (the sun is
+// fixed in the world, so the relief's shadows move across the terrain), but it needs a new one only once the planet has turned
+// far enough for the shadows to have visibly shifted, so the spin requests one every SHADOW_SPIN_STEP radians (~1 degree,
+// ~100 km at the equator; about every 19 frames at the default spin) instead of every frame.
+const SHADOW_SPIN_STEP = 0.015;
+let _shTheta = 0;
+export function requestShadowUpdate(theta) { renderer.shadowMap.needsUpdate = true; if (theta !== undefined) _shTheta = theta; }
+export function shadowSpinTick(theta) { if (Math.abs(theta - _shTheta) > SHADOW_SPIN_STEP) requestShadowUpdate(theta); }
 export function setShadowsWanted(on) { _shadowsWanted = on; applySun(); }
 // Uniforms so the river ribbons (a custom shader) can look up the same shadow map.
 const _noShadowTex = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);

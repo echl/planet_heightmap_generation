@@ -3,7 +3,7 @@
 import * as THREE from 'three';
 import { renderer, scene, camera, ctrl, waterMesh, atmosMesh, starsMesh,
          mapCamera, updateMapCameraFrustum, mapCtrl, canvas,
-         tickZoom, tickMapZoom, setAtmosphereScale, setSunLighting, setSunLongitude, setSunMonth, setShadowsWanted, requestShadowUpdate } from './scene.js';
+         tickZoom, tickMapZoom, setAtmosphereScale, setSunLighting, setSunLongitude, setSunMonth, setShadowsWanted, requestShadowUpdate, shadowSpinTick } from './scene.js';
 import { state } from './state.js';
 import { generate, reapplyViaWorker, computeClimateViaWorker, editRecomputeViaWorker } from './generate.js';
 import { encodePlanetCode, decodePlanetCode } from './planet-code.js';
@@ -1200,8 +1200,8 @@ function animate() {
     if (state.mapMode) { tickMapZoom(); mapCtrl.update(); } else { tickZoom(); ctrl.update(); }
     if (!state.mapMode && state.planetMesh && document.getElementById('chkRotate').checked) {
         state.planetMesh.rotation.y += 0.0008;
-        requestShadowUpdate();
         waterMesh.rotation.y = state.planetMesh.rotation.y;
+        shadowSpinTick(state.planetMesh.rotation.y);
         if (state.wireMesh) state.wireMesh.rotation.y = state.planetMesh.rotation.y;
         if (state.arrowGroup) state.arrowGroup.rotation.y = state.planetMesh.rotation.y;
         if (state.windArrowGroup) state.windArrowGroup.rotation.y = state.planetMesh.rotation.y;

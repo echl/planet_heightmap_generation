@@ -335,6 +335,7 @@ function koppenColor(classId) {
 // precipitation, cached on state.curData). They tint cell colours in the Terrain and
 // Satellite views, and the "River Discharge" inspect layer shows the raw data.
 const WATER_LAKE = [0.20, 0.43, 0.69];
+const WATER_LAKE_REAL = [0.07, 0.19, 0.36];        // Realistic mode: deeper, darker lakes
 const WATER_RIVER = [null, [0.45, 0.66, 0.86], [0.34, 0.58, 0.84], [0.24, 0.49, 0.81], [0.15, 0.40, 0.77]];
 
 // Rivers are drawn as thin ribbons in the live views (river-lines.js); only lakes are filled
@@ -344,7 +345,8 @@ function makeWaterTint(allowed, withRivers = false) {
     const h = getHydrology(state.curData);
     if (!h) return null;
     const { r_lake, r_river } = h;
-    return (br) => (r_lake[br] ? WATER_LAKE : (withRivers ? (WATER_RIVER[r_river[br]] || null) : null));
+    const lakeCol = state.realisticRelief ? WATER_LAKE_REAL : WATER_LAKE;
+    return (br) => (r_lake[br] ? lakeCol : (withRivers ? (WATER_RIVER[r_river[br]] || null) : null));
 }
 
 // Hydrology inspect layers. Each is a per-region Float32Array plus a colour function:

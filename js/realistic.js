@@ -26,6 +26,8 @@ export const realUniforms = {
     cloudEvo: { value: 0 },
     cloudWindTex: { value: dummyWind },   // RGBA8: summer E,N then winter E,N wind (speed-scaled unit vectors, 0.5 = calm)
     cloudWindOn: { value: 0 },
+    climTex: { value: dummyTex },         // RG8: annual-mean-ready temperature, summer and winter (0..1 = -45..45 C), for the climate-zone ground texture
+    contTex: { value: dummyWind },        // RGBA8: per-continent tint (rgb) and pattern seed (a)
     lightTex: { value: dummyTex },        // RG8: thunderstorm likelihood, summer and winter
     lightTime: { value: 0 },              // storm clock in seconds, advanced only by the planet's spin
     lightOn: { value: 0 },          // time offset that makes the cloud shapes evolve (octaves slide at different speeds)
@@ -120,13 +122,10 @@ vNX = normalMatrix * vec3(1.0, 0.0, 0.0); vNY = normalMatrix * vec3(0.0, 1.0, 0.
 varying vec3 vOP; varying float vHk; varying vec3 vNX; varying vec3 vNY; varying vec3 vNZ;
 varying vec3 vTA; varying vec3 vTB; varying vec3 vTC; varying vec3 vBary; varying vec3 vON;
 varying float vSnow;
-uniform float realFx; uniform vec3 sunObj;
+uniform float realFx; uniform vec3 sunObj; uniform sampler2D climTex; uniform sampler2D contTex;
 ${NOISE_GLSL}${CLOUD_GLSL}
 float lodw(float f, float fw) { return 1.0 - smoothstep(0.2, 0.7, f * fw); }
-float microH(vec3 p, float fw) {
-    return 0.55 * vnoise(p * 140.0) * lodw(140.0, fw) + 0.30 * vnoise(p * 480.0) * lodw(480.0, fw)
-         + 0.15 * vnoise(p * 1600.0) * lodw(1600.0, fw);
-}`)
+`)
             .replace('#include <color_fragment>', `#include <color_fragment>
 if (realFx > 0.5) {
     float fw = length(fwidth(vOP));
@@ -153,6 +152,63 @@ if (realFx > 0.5) {
         diffuseColor.rgb *= vec3(1.0 + 0.30 * pa, 1.0 + 0.12 * pa, 1.0 - 0.26 * pa);
         float pb = vnoise(vOP * 150.0 + 3.0) - 0.5;
         diffuseColor.rgb *= 1.0 + 0.16 * pb * smoothstep(0.0, 0.6, diffuseColor.g);
+        // Climate-zone ground texture. The model's own annual-mean temperature and precipitation (smooth textures, so the
+        // zones blend into each other across cell borders) choose the style of the ground: mottled canopy in the humid forests,
+        // golden grass patches and scattered trees in the savannas and steppes, ridged dunes, strata and dark gravel in the
+        // deserts, lichen and bog patches towards the cold tundra. Snow and ice (bright ground) are left alone.
+        {
+            vec3 nC = normalize(vOP);
+            vec2 cuv = vec2(atan(nC.z, nC.x) * 0.15915494 + 0.5, asin(clamp(nC.y, -1.0, 1.0)) * 0.31830989 + 0.5);
+            vec2 pcl = texture2D(cloudTex, cuv).rg, tcl = texture2D(climTex, cuv).rg;
+            float P = 0.5 * (pcl.r + pcl.g), Tc = -45.0 + 45.0 * (tcl.r + tcl.g), seas = abs(pcl.r - pcl.g);
+            float wet = smoothstep(0.30, 0.58, P), dry = 1.0 - smoothstep(0.05, 0.20, P);
+            float cold = 1.0 - smoothstep(-8.0, 5.0, Tc), warm = smoothstep(12.0, 24.0, Tc);
+            float free = 1.0 - smoothstep(0.55, 0.80, dot(diffuseColor.rgb, vec3(0.33)));
+            float forest = wet * (1.0 - 0.7 * cold) * free;
+            float grass = (1.0 - wet) * (1.0 - dry) * (1.0 - cold) * free;
+            float desert = dry * (1.0 - 0.8 * cold) * free;
+            float tund = cold * (1.0 - wet * 0.5) * free;
+            float l1 = lodw(420.0, fw), l2 = lodw(1300.0, fw);
+            // forest: dappled canopy, richer green and yellower in the warm zones, bluer and darker in the cold ones
+            float cn = 0.5 * vnoise(vOP * 160.0) + 0.32 * vnoise(vOP * 420.0) * l1 + 0.18 * vnoise(vOP * 1300.0) * l2;
+            float cd = cn - 0.5;
+            diffuseColor.rgb *= mix(vec3(1.0), vec3(1.0 + 0.55 * cd, 1.0 + 0.40 * cd, 1.0 - 0.30 * cd), forest);
+            diffuseColor.rgb *= mix(vec3(1.0), mix(vec3(0.86, 0.96, 1.06), vec3(1.10, 1.06, 0.90), warm), forest * 0.8);
+            // grass and scrub: large golden / green patches (browner where the rain is seasonal), dark tree dots
+            float gp = smoothstep(0.38, 0.66, 0.6 * vnoise(vOP * 38.0 + 9.0) + 0.4 * vnoise(vOP * 130.0 + 4.0));
+            diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * vec3(1.40, 1.16, 0.66), gp * grass * (0.45 + 0.4 * smoothstep(0.0, 0.5, seas)));
+            diffuseColor.rgb *= 1.0 - 0.38 * smoothstep(0.70, 0.80, vnoise(vOP * 900.0 + 2.0)) * lodw(900.0, fw) * grass * (1.0 - 0.6 * dry);
+            // desert: ridged dune pattern, red and pale strata, dark gravel patches
+            float rd = 1.0 - abs(2.0 * vnoise(vOP * 85.0 + 5.0) - 1.0);
+            float dn = rd * 0.65 + 0.35 * (1.0 - abs(2.0 * vnoise(vOP * 260.0 + 1.0) - 1.0)) * lodw(260.0, fw);
+            diffuseColor.rgb *= 1.0 + desert * 0.30 * (dn - 0.55);
+            float st = smoothstep(0.35, 0.65, vnoise(vOP * 16.0 + 12.0));
+            diffuseColor.rgb *= mix(vec3(1.0), mix(vec3(1.16, 0.93, 0.74), vec3(1.0, 1.0, 0.96), st), desert * 0.85);
+            diffuseColor.rgb *= 1.0 - 0.30 * smoothstep(0.62, 0.74, vnoise(vOP * 190.0 + 8.0)) * desert;
+            // tundra and cold ground: lichen / moss mottling, dark boggy patches
+            float ln = 0.6 * vnoise(vOP * 300.0) * lodw(300.0, fw) + 0.4 * vnoise(vOP * 90.0) + 0.2;
+            diffuseColor.rgb *= mix(vec3(1.0), vec3(1.0 + 0.55 * (ln - 0.5), 1.0 + 0.45 * (ln - 0.5), 1.0 + 0.10 * (ln - 0.5)), tund);
+            diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * vec3(0.62, 0.62, 0.66), smoothstep(0.66, 0.78, vnoise(vOP * 55.0 + 3.0)) * tund * 0.8);
+            diffuseColor.rgb = max(diffuseColor.rgb, vec3(0.0));
+            // Large-scale features unique to each continent (a stable look from the planet seed): an overall tint, big blotches of a
+            // second tint at a continent-specific scale, and on some continents long bands (strata, ranges, belts) in a continent-specific direction.
+            {
+                vec4 ct = texture2D(contTex, cuv);
+                vec3 tint = ct.rgb * 0.4 + 0.8;
+                float A = ct.a, k1 = fract(A * 13.7), k2 = fract(A * 5.31), k3 = fract(A * 31.9);
+                float f = mix(4.0, 11.0, k1);
+                vec3 wv = vec3(vnoise(vOP * f * 0.7 + A * 41.0), vnoise(vOP * f * 0.7 + A * 17.0 + 9.0), vnoise(vOP * f * 0.7 + A * 5.0 + 3.0)) - 0.5;
+                float blot = vnoise(vOP * f + wv * 1.4 + A * 57.0);
+                vec3 ax = normalize(vec3(sin(6.2831853 * k1), cos(6.2831853 * k2) * 0.7, sin(6.2831853 * k3)));
+                float band = sin(dot(vOP, ax) * mix(14.0, 34.0, k3) + 4.0 * (blot - 0.5) + 6.2831853 * k2);
+                float bandAmt = smoothstep(0.30, 0.65, k2);
+                float zone = free * (0.35 + 0.65 * (1.0 - desert * 0.3));
+                diffuseColor.rgb *= mix(vec3(1.0), tint, zone);
+                diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * tint.zxy, smoothstep(0.42, 0.66, blot) * 0.6 * zone);
+                diffuseColor.rgb *= 1.0 + zone * (0.26 * (blot - 0.5) * (0.5 + k1) + 0.10 * bandAmt * band);
+                diffuseColor.rgb = max(diffuseColor.rgb, vec3(0.0));
+            }
+        }
         vec3 nO0 = normalize(vOP);
         vec3 sv = vON - nO0 * dot(vON, nO0);
         float slope = length(sv) / max(dot(vON, nO0), 0.2);
@@ -174,20 +230,6 @@ if (realFx > 0.5) {
         float cd = cloudDensity(normalize(vOP + sunObj * (${(CLOUD_R - 1).toFixed(4)} / max(mu, 0.15))));
         diffuseColor.rgb *= 1.0 - 0.55 * cd;
     }
-}`)
-            .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
-if (realFx > 0.5) {
-    float fw2 = length(fwidth(vOP));
-    float e = 0.0004;
-    float b0 = microH(vOP, fw2);
-    vec3 g = vec3(microH(vOP + vec3(e, 0.0, 0.0), fw2) - b0, microH(vOP + vec3(0.0, e, 0.0), fw2) - b0,
-                  microH(vOP + vec3(0.0, 0.0, e), fw2) - b0) / e;
-    vec3 nO2 = normalize(vOP);
-    g -= dot(g, nO2) * nO2;
-    float hk = max(vHk, 0.0);
-    float A = 0.00035 * (0.35 + 1.4 * min(hk / 3.0, 1.0)) * smoothstep(-0.02, 0.05, vHk);
-    vec3 gv = g.x * vNX + g.y * vNY + g.z * vNZ;
-    normal = normalize(normal - A * gv);
 }`);
     };
     const type = mat.type, oldKey = mat.customProgramCacheKey;
@@ -263,6 +305,51 @@ function lightningLikelihood(precip, tempC, land) {
     return Math.min(1, wet * warm * (land ? 1 : 0.12) * 1.4);
 }
 
+// Landmasses: connected components of land cells (flood fill over the mesh adjacency). Every ocean cell takes the id of the
+// nearest landmass (multi-source flood from the coast), so the per-continent texture can be filtered smoothly without
+// bleeding a neutral value into the coastline. Each landmass gets a stable pseudo-random look from the planet seed:
+// a tint colour and a pattern seed.
+function hash32(a, b) {
+    let h = (a ^ 0x9e3779b9) + Math.imul(b | 0, 0x85ebca6b);
+    h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d); h = Math.imul(h ^ (h >>> 12), 0x297a2d39); h ^= h >>> 15;
+    return (h >>> 0) / 4294967295;
+}
+function landmassLook(cd) {
+    const mesh = cd.mesh, N = mesh.numRegions, el = cd.r_elevation, { adjOffset, adjList } = mesh;
+    const id = new Int32Array(N).fill(-1), first = [];
+    const stack = new Int32Array(N);
+    for (let r = 0; r < N; r++) {
+        if (el[r] <= 0 || id[r] >= 0) continue;
+        const c = first.length; first.push(r);
+        let sp = 0; stack[sp++] = r; id[r] = c;
+        while (sp) {
+            const u = stack[--sp];
+            for (let k = adjOffset[u]; k < adjOffset[u + 1]; k++) {
+                const v = adjList[k];
+                if (el[v] > 0 && id[v] < 0) { id[v] = c; stack[sp++] = v; }
+            }
+        }
+    }
+    // ocean cells: the nearest landmass
+    const queue = new Int32Array(N); let qh = 0, qt = 0;
+    for (let r = 0; r < N; r++) if (id[r] >= 0) queue[qt++] = r;
+    const lab = Int32Array.from(id);
+    while (qh < qt) {
+        const u = queue[qh++];
+        for (let k = adjOffset[u]; k < adjOffset[u + 1]; k++) {
+            const v = adjList[k];
+            if (lab[v] < 0) { lab[v] = lab[u]; queue[qt++] = v; }
+        }
+    }
+    const seed = cd.seed | 0;
+    const look = first.map((r0) => {
+        const h = 6.2831853 * hash32(seed, r0 * 3 + 1), a = 0.07 + 0.08 * hash32(seed, r0 * 3 + 2);
+        const t = [0, 1, 2].map((i) => 1 + a * Math.cos(h + i * 2.0943951));
+        return { t, seed: hash32(seed, r0 * 3 + 3) };
+    });
+    return { lab, look };
+}
+
 function buildCloudTexture(cd) {
     const W = 720, H = 360, mesh = cd.mesh, N = mesh.numRegions, xyz = cd.r_xyz;
     const ps = cd.r_precip_summer, pw = cd.r_precip_winter;
@@ -288,6 +375,9 @@ function buildCloudTexture(cd) {
     }
     const wdata = new Uint8Array(W * H * 4).fill(128);
     const ldata = new Uint8Array(W * H * 2);
+    const tdata = new Uint8Array(W * H * 2);
+    const cdata = new Uint8Array(W * H * 4);
+    const lm = (cd.r_elevation && cd.seed !== undefined) ? landmassLook(cd) : null;
     const tS = cd.r_temperature_summer, tW = cd.r_temperature_winter, elev = cd.r_elevation;
     for (let j = 0; j < H; j++) {
         const lat = ((j + 0.5) / H - 0.5) * Math.PI, cl = Math.cos(lat), sl = Math.sin(lat);
@@ -311,9 +401,16 @@ function buildCloudTexture(cd) {
             }
             const o = (j * W + i) * 2;
             if (best >= 0) {
+                if (lm && lm.lab[best] >= 0) {
+                    const L = lm.look[lm.lab[best]], o4 = (j * W + i) * 4;
+                    for (let q = 0; q < 3; q++) cdata[o4 + q] = Math.max(0, Math.min(255, Math.round((L.t[q] - 0.8) / 0.4 * 255)));
+                    cdata[o4 + 3] = Math.round(255 * L.seed);
+                }
                 data[o] = Math.max(0, Math.min(255, Math.round(255 * ps[best])));
                 data[o + 1] = Math.max(0, Math.min(255, Math.round(255 * pw[best])));
                 if (tS && tW) {
+                    tdata[o] = Math.max(0, Math.min(255, Math.round(255 * tS[best])));
+                    tdata[o + 1] = Math.max(0, Math.min(255, Math.round(255 * tW[best])));
                     const land = elev[best] > 0;
                     ldata[o] = Math.round(255 * lightningLikelihood(ps[best], -45 + 90 * tS[best], land));
                     ldata[o + 1] = Math.round(255 * lightningLikelihood(pw[best], -45 + 90 * tW[best], land));
@@ -341,7 +438,15 @@ function buildCloudTexture(cd) {
     ltex.wrapS = THREE.RepeatWrapping; ltex.wrapT = THREE.ClampToEdgeWrapping;
     ltex.minFilter = ltex.magFilter = THREE.LinearFilter; ltex.generateMipmaps = false;
     ltex.needsUpdate = true;
-    return { tex, wtex, ltex, haveWind };
+    const ctex = new THREE.DataTexture(tdata, W, H, THREE.RGFormat, THREE.UnsignedByteType);
+    ctex.wrapS = THREE.RepeatWrapping; ctex.wrapT = THREE.ClampToEdgeWrapping;
+    ctex.minFilter = ctex.magFilter = THREE.LinearFilter; ctex.generateMipmaps = false;
+    ctex.needsUpdate = true;
+    const ktex = new THREE.DataTexture(cdata, W, H, THREE.RGBAFormat, THREE.UnsignedByteType);
+    ktex.wrapS = THREE.RepeatWrapping; ktex.wrapT = THREE.ClampToEdgeWrapping;
+    ktex.minFilter = ktex.magFilter = THREE.LinearFilter; ktex.generateMipmaps = false;
+    ktex.needsUpdate = true;
+    return { tex, wtex, ltex, ctex, ktex, haveWind };
 }
 
 function ensureCloudMesh() {
@@ -490,6 +595,10 @@ export function tickRealistic() {
             if (realUniforms.cloudTex.value !== dummyTex) realUniforms.cloudTex.value.dispose();
             if (realUniforms.cloudWindTex.value !== dummyWind) realUniforms.cloudWindTex.value.dispose();
             if (realUniforms.lightTex.value !== dummyTex) realUniforms.lightTex.value.dispose();
+            if (realUniforms.climTex.value !== dummyTex) realUniforms.climTex.value.dispose();
+            realUniforms.climTex.value = t.ctex;
+            if (realUniforms.contTex.value !== dummyWind) realUniforms.contTex.value.dispose();
+            realUniforms.contTex.value = t.ktex;
             realUniforms.lightTex.value = t.ltex;
             realUniforms.cloudTex.value = t.tex; realUniforms.cloudWindTex.value = t.wtex; realUniforms.cloudWindOn.value = t.haveWind ? 1 : 0;
         }

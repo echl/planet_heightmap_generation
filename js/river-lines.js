@@ -28,6 +28,7 @@ const MAP_Z = 0.002;
 
 const COL_SMALL = [0.16, 0.40, 0.85];
 const COL_BIG = [0.04, 0.17, 0.58];
+const DARKEN_REAL = 0.45;                 // Realistic mode: darker river water
 const NM = 12;
 const TEX_W = 2048;
 
@@ -56,8 +57,11 @@ uniform vec3 colBig;
 uniform vec2 viewport;      // CSS pixels
 uniform float unitsPerKm;
 uniform float minPx;
+uniform float cullThin;      // 1 (Realistic): a ribbon fades in as its true width grows from 0.35 to 1 pixel, and is not drawn below that; 0: always at least minPx
+uniform float darken;
 uniform float depthBias;     // world units toward the camera (globe); 0 on the map
 varying vec3 vColor;
+varying float vFade;
 varying float vWx;
 varying vec3 vN;            // world-space surface normal (globe: radial)
 varying vec3 vWp;           // world position (for the shadow lookup)
@@ -74,13 +78,13 @@ void main() {
     int m1 = (m0 + 1) % 12;
     float Q = mix(qAt(segId, m0), qAt(segId, m1), fr);
     if (Q < minQ) {                      // dry (or below the stream cut-off): draw nothing
-        vColor = vec3(0.0); vWx = 0.0;
+        vColor = vec3(0.0); vWx = 0.0; vFade = 0.0;
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         return;
     }
     float widthKm = widthK * sqrt(Q / 1.0e6);
     float f = clamp((log(Q) / 2.302585 - qLo) / (7.0 - qLo), 0.0, 1.0);
-    vColor = mix(colSmall, colBig, f);
+    vColor = mix(colSmall, colBig, f) * darken;
     // Nudge toward the camera in view space (a distance, not a depth-buffer fraction), so the ribbon
     // clears the terrain triangles under it but is still hidden by mountains in front of it.
     vec4 mvA = modelViewMatrix * vec4(position, 1.0); mvA.z += depthBias;
@@ -97,7 +101,18 @@ void main() {
     vec4 c = mix(cA, cB, corner.x);
     // Pixels per world unit at this depth (works for the perspective and orthographic cameras).
     float pxPerUnit = projectionMatrix[1][1] * viewport.y * 0.5 / c.w;
-    float halfPx = max(0.5 * minPx, 0.5 * widthKm * unitsPerKm * pxPerUnit);
+    float truePx = widthKm * unitsPerKm * pxPerUnit;
+    vFade = 1.0;
+    if (cullThin > 0.5) {                // judge the whole segment by its mid-point so both ends agree
+        float pxMid = projectionMatrix[1][1] * viewport.y * 0.5 / (0.5 * (cA.w + cB.w));
+        vFade = smoothstep(0.35 * minPx, minPx, widthKm * unitsPerKm * pxMid);
+        if (vFade <= 0.0) {
+            vColor = vec3(0.0); vWx = 0.0;
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+            return;
+        }
+    }
+    float halfPx = max(0.5 * minPx, 0.5 * truePx);
     vec2 off = n * corner.y * halfPx + d * (corner.x * 2.0 - 1.0) * halfPx;   // square caps close the joints
     c.xy += off / (viewport * 0.5) * c.w;
     vec4 wp = modelMatrix * vec4(mix(position, posB, corner.x), 1.0);
@@ -113,6 +128,7 @@ uniform vec3 ambRGB;
 uniform float dayOnly;
 uniform float lit;
 varying vec3 vColor;
+varying float vFade;
 varying float vWx;
 varying vec3 vN;
 varying vec3 vWp;
@@ -135,11 +151,11 @@ void main() {
         }
         col *= (ambRGB + sunRGB * d) / 3.14159265;
     }
-    gl_FragColor = vec4(col, 1.0);
+    gl_FragColor = vec4(col, vFade);
     #include <colorspace_fragment>
 }`;
 
-function makeMaterial(unitsPerKm, depthBias, clipX, qTex, lit) {
+function makeMaterial(unitsPerKm, depthBias, clipX, qTex, lit, cull = false) {
     return new THREE.ShaderMaterial({
         uniforms: {
             ...shared,
@@ -148,6 +164,8 @@ function makeMaterial(unitsPerKm, depthBias, clipX, qTex, lit) {
             viewport: { value: new THREE.Vector2(1, 1) },
             unitsPerKm: { value: unitsPerKm },
             minPx: { value: MIN_PX },
+            cullThin: { value: cull ? 1 : 0 },
+            darken: { value: cull ? DARKEN_REAL : 1 },
             depthBias: { value: depthBias },
             clipX: { value: clipX },
             lit: { value: lit ? 1 : 0 },
@@ -157,6 +175,7 @@ function makeMaterial(unitsPerKm, depthBias, clipX, qTex, lit) {
         vertexShader: VERT,
         fragmentShader: FRAG,
         depthWrite: false,
+        transparent: !!cull,              // Realistic: rivers fade in as they widen past a pixel
         side: THREE.DoubleSide,           // the screen-space quad winding is not preserved by the projection
     });
 }
@@ -338,7 +357,7 @@ export function buildGlobeRivers() {
             segs.pb.push(e[0] * dB, e[1] * dB, e[2] * dB);
         });
     }
-    const mesh = makeRibbonMesh(segs, (tex) => makeMaterial(1 / EARTH_KM, state.realisticRelief ? 0.0006 : 0.006, 0, tex, true));
+    const mesh = makeRibbonMesh(segs, (tex) => makeMaterial(1 / EARTH_KM, state.realisticRelief ? 0.0006 : 0.006, 0, tex, true, !!state.realisticRelief));
     mesh.visible = riverLinesWanted();
     state.planetMesh.add(mesh);          // child of the planet, so it follows auto-rotation
     state.riverGlobeMesh = mesh;
